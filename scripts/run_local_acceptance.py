@@ -22,6 +22,13 @@ SOCKET = Path.home() / ".orbstack/run/docker.sock"
 DOCKER = "/usr/local/bin/docker"
 
 
+def content_digest(files: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for file in sorted(files):
+        digest.update(file.relative_to(ROOT).as_posix().encode() + b"\0" + file.read_bytes())
+    return digest.hexdigest()
+
+
 def main() -> None:
     run_id = secrets.token_hex(6)
     label = f"titlemcp.acceptance={run_id}"
@@ -45,7 +52,10 @@ def main() -> None:
     artifacts = ROOT / "scripts/acceptance"
     containers: list[str] = []
     network = None
+    pg = None
     built = False
+    harness_inputs = [Path(__file__).resolve(), *sorted(artifacts.glob("*.py"))]
+    results["acceptance_harness_sha256"] = content_digest(harness_inputs)
 
     def interrupted(signum, _frame):
         raise RuntimeError(f"Acceptance interrupted by signal {signum}")
@@ -130,6 +140,7 @@ def main() -> None:
             "TITLE_MCP_STATE_BACKEND=postgres\n"
             f"TITLE_MCP_POSTGRES_DSN=postgresql://acceptance_user:{password}@{prefix}-db:5432/titlemcp_acceptance_{run_id}\n"
             f"TITLE_MCP_MCP_ACCESS_TOKEN={token}\nTITLE_MCP_BACKGROUND_WORKER_CONCURRENCY=1\n"
+            "TITLE_MCP_READINESS_TIMEOUT_SECONDS=1\n"
             "TITLE_MCP_LOG_LEVEL=WARNING\n"
         )
         for file in (pg_env, app_env):
@@ -158,12 +169,7 @@ def main() -> None:
                 ROOT / "packages/titlemcp/LICENSE",
                 ROOT / "packages/jurisdictions/us/oh/franklin/recorder/titlemcp-capability.toml",
             ]
-            digest = hashlib.sha256()
-            for file in sorted(inputs):
-                digest.update(
-                    file.relative_to(ROOT).as_posix().encode() + b"\0" + file.read_bytes()
-                )
-            results["build_input_sha256"] = digest.hexdigest()
+            results["build_input_sha256"] = content_digest(inputs)
             context = private / "build-context"
             for file in [*inputs, ROOT / ".dockerignore"]:
                 destination = context / file.relative_to(ROOT)
@@ -334,6 +340,39 @@ def main() -> None:
                 )
             )
             results["checks"]["http_mcp"] = created
+
+            def readiness_probe(name: str, status: int) -> dict:
+                args = ["exec", app, "python", "/acceptance/readiness_checks.py", str(status)]
+                if status == 200:
+                    args.append(created["workflow_id"])
+                return json.loads(call(name, args, timeout=30))
+
+            app_started = call(
+                "app-start-identity", ["inspect", app, "--format", "{{.State.StartedAt}}"]
+            )
+            outages = {"healthy_before": readiness_probe("readiness-before", 200)}
+            results["checks"]["database_outage"] = outages
+            print("Checking readiness with paused and disconnected disposable Postgres", flush=True)
+            try:
+                call("postgres-pause", ["pause", pg])
+                outages["paused"] = readiness_probe("readiness-paused", 503)
+            finally:
+                call("postgres-unpause", ["unpause", pg], check=False)
+            outages["after_unpause"] = readiness_probe("readiness-after-unpause", 200)
+            try:
+                call("postgres-disconnect", ["network", "disconnect", network, pg])
+                outages["disconnected"] = readiness_probe("readiness-disconnected", 503)
+            finally:
+                call("postgres-reconnect", ["network", "connect", network, pg], check=False)
+            outages["after_reconnect"] = readiness_probe("readiness-after-reconnect", 200)
+            assert (
+                call("app-outage-identity", ["inspect", app, "--format", "{{.State.StartedAt}} "])
+                == app_started
+            )
+            outages["application_restarted"] = False
+            print(
+                "Database-outage readiness and restoration passed without app restart", flush=True
+            )
             call("app-stop", ["stop", "--time", "10", app])
             stopped = json.loads(
                 call("app-stopped", ["inspect", app, "--format", "{{json .State}} "])
@@ -400,6 +439,11 @@ def main() -> None:
             raise
         finally:
             cleanup_errors = []
+            if pg:
+                try:
+                    call("cleanup-unpause", ["unpause", pg], check=False)
+                except Exception as exc:
+                    cleanup_errors.append(str(exc))
             for container in reversed(containers):
                 try:
                     call("container-logs", ["logs", "--tail", "60", container], check=False)
@@ -426,6 +470,9 @@ def main() -> None:
             )
             if remaining or remaining_network or cleanup_errors:
                 results["status"] = "failed"
+            if content_digest(harness_inputs) != results["acceptance_harness_sha256"]:
+                results["status"] = "failed"
+                results["error"] = "Acceptance harness changed during execution."
             (output / "result.json").write_text(json.dumps(results, indent=2) + "\n")
             print(json.dumps(results, indent=2), flush=True)
     if results["status"] != "passed":
