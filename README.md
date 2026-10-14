@@ -1,5 +1,8 @@
 # Title MCP Monorepo
 
+Pat Carney's personal development version. See [FORK.md](FORK.md) for provenance,
+license status and execution limits.
+
 TitleMCP is a toolkit for title companies that want to expand their MCP server
 tool surface with practical title and real estate operations capabilities. It is
 designed to expose reusable, structured tools for local LLMs, hosted agents, and
@@ -30,7 +33,8 @@ This repository is organized as a Python package monorepo for TitleMCP.
 [![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&repository=github.com/titlemcp/titlemcp&branch=main&builder=dockerfile&name=titlemcp&ports=8000;http;/&env%5BPORT%5D=8000)
 
 Each button builds this repository's Docker image and serves MCP at
-`https://<your-app>/mcp`. The server has no sign-in of its own, so read
+`https://<your-app>/mcp`. HTTP access requires a private instance Bearer credential.
+There is no human sign-in UI or multi-tenant authorization, so read
 [Deploying](docs/DEPLOY.md) before you add credentials to a public deployment.
 
 ## Start Here
@@ -81,7 +85,11 @@ Run the Dockerized server and MCP Inspector:
 docker compose up --build
 ```
 
-Open the server catalog at `http://localhost:8000/` or the MCP Inspector at
+Configure a unique `TITLE_MCP_MCP_ACCESS_TOKEN` with at least 32 visible ASCII
+characters in your private local configuration before starting HTTP mode.
+Without it, application requests are denied; `/healthz` remains available.
+Supply `Authorization: Bearer <instance-credential>` in an HTTP client to read
+the server catalog at `http://localhost:8000/`, or open MCP Inspector at
 `http://localhost:6274/`. The catalog response includes `mcp.url` and an
 `inspector.url` with the backend prefilled for Docker. The Dockerized Inspector
 also defaults to:
@@ -89,6 +97,7 @@ also defaults to:
 ```text
 Transport: Streamable HTTP
 URL: http://titlemcp:8000/mcp
+Authorization: Bearer <instance-credential>
 ```
 
 The Inspector proxy is bound to localhost by default. It requires a session token;

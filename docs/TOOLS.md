@@ -407,7 +407,6 @@ metadata.
 
 - `get_workflow_status`
 - `list_workflows`
-- `submit_human_review`
 - `list_title_capabilities`
 - `list_source_connectors`
 - `list_vendor_connectors`
@@ -445,3 +444,8 @@ The server exposes prompt templates that can be tested in MCP Inspector:
 TitleMCP tools default to `requires_human_review=true` when facts or workflows
 can affect title, settlement, legal, underwriting, payoff, lien, tax, or
 recording decisions.
+
+Workflow review cannot be disabled by the agent. Review decisions are accepted
+only by the internal service with a separately authenticated, authorized human
+principal; `submit_human_review` is not an MCP tool. See
+[Configuration](CONFIGURATION.md#server) for the host integration contract.

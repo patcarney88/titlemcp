@@ -6,15 +6,17 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from starlette.testclient import TestClient
-
 from title_mcp.mcp.server import create_mcp_server, transport_options
 from title_mcp.mcp.tool_catalog import _public_parcel_lookup_result
 from title_mcp.settings import TitleMCPSettings
+
+HTTP_CREDENTIAL = "synthetic-local-discovery-credential-0001"
 
 
 class ToolCatalogRouteTests(unittest.TestCase):
     def test_root_lists_tools_with_descriptions_and_annotations(self) -> None:
         settings = TitleMCPSettings(
+            mcp_access_token=HTTP_CREDENTIAL,
             app_name="Test Title MCP",
             environment="test",
             log_json=False,
@@ -24,7 +26,9 @@ class ToolCatalogRouteTests(unittest.TestCase):
         )
         server = create_mcp_server(settings)
 
-        with TestClient(server.streamable_http_app()) as client:
+        with TestClient(
+            server.streamable_http_app(), headers={"Authorization": f"Bearer {HTTP_CREDENTIAL}"}
+        ) as client:
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
@@ -79,6 +83,7 @@ class ToolCatalogRouteTests(unittest.TestCase):
 
     def test_root_prefills_inspector_url_when_configured(self) -> None:
         settings = TitleMCPSettings(
+            mcp_access_token=HTTP_CREDENTIAL,
             app_name="Test Title MCP",
             environment="test",
             log_json=False,
@@ -90,7 +95,9 @@ class ToolCatalogRouteTests(unittest.TestCase):
         )
         server = create_mcp_server(settings)
 
-        with TestClient(server.streamable_http_app()) as client:
+        with TestClient(
+            server.streamable_http_app(), headers={"Authorization": f"Bearer {HTTP_CREDENTIAL}"}
+        ) as client:
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
@@ -99,12 +106,13 @@ class ToolCatalogRouteTests(unittest.TestCase):
         self.assertEqual(inspector["backend_url"], "http://titlemcp:8000/mcp")
 
         query = parse_qs(urlsplit(inspector["url"]).query)
-        self.assertEqual(query["MCP_PROXY_AUTH_TOKEN"], ["test-token"])
+        self.assertNotIn("MCP_PROXY_AUTH_TOKEN", query)
         self.assertEqual(query["transport"], ["streamable-http"])
         self.assertEqual(query["serverUrl"], ["http://titlemcp:8000/mcp"])
 
     def test_health_routes_report_status(self) -> None:
         settings = TitleMCPSettings(
+            mcp_access_token=HTTP_CREDENTIAL,
             app_name="Test Title MCP",
             environment="test",
             log_json=False,
@@ -114,7 +122,9 @@ class ToolCatalogRouteTests(unittest.TestCase):
         )
         server = create_mcp_server(settings)
 
-        with TestClient(server.streamable_http_app()) as client:
+        with TestClient(
+            server.streamable_http_app(), headers={"Authorization": f"Bearer {HTTP_CREDENTIAL}"}
+        ) as client:
             health = client.get("/healthz")
             ready = client.get("/readyz")
 
@@ -125,6 +135,7 @@ class ToolCatalogRouteTests(unittest.TestCase):
 
     def test_inspector_resources_and_prompts_are_readable(self) -> None:
         settings = TitleMCPSettings(
+            mcp_access_token=HTTP_CREDENTIAL,
             app_name="Test Title MCP",
             environment="test",
             log_json=False,
@@ -194,6 +205,7 @@ class ToolCatalogRouteTests(unittest.TestCase):
 
     def test_server_configures_transport_security_from_settings(self) -> None:
         settings = TitleMCPSettings(
+            mcp_access_token=HTTP_CREDENTIAL,
             log_json=False,
             mcp_allowed_hosts="localhost:*,127.0.0.1:*",
             mcp_allowed_origins="http://localhost:*,http://127.0.0.1:*",

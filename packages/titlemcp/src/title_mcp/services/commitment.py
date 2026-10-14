@@ -32,7 +32,12 @@ from title_mcp.domain.exam import (
     TaxParcelEntry,
 )
 from title_mcp.domain.title import RecordingReference
-from title_mcp.services.exam import Discrepancy, ReconciliationResult, ReconciliationStatus
+from title_mcp.services.exam import (
+    Discrepancy,
+    ReconciliationResult,
+    ReconciliationStatus,
+    package_digest,
+)
 
 
 class CommitmentRenderStatus(StrEnum):
@@ -234,6 +239,16 @@ class CommitmentRenderService:
                     "human before a commitment can be drafted."
                 ),
                 blocking_discrepancies=blocking,
+            )
+
+        if reconciliation.package_sha256 != package_digest(package):
+            return CommitmentRenderResult(
+                file_number=package.file_number,
+                status=CommitmentRenderStatus.REFUSED,
+                refusal_reason=(
+                    "The package has changed or its reconciliation is not bound to this content. "
+                    "Reconcile the current package before drafting."
+                ),
             )
 
         schedule_b2 = self._render_b2(package, clause_set)

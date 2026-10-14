@@ -17,6 +17,7 @@ from title_mcp.domain.models import (
     utc_now,
 )
 from title_mcp.observability import current_trace_id, get_logger, trace_span
+from title_mcp.security import AuthenticatedPrincipal, require_human_reviewer
 from title_mcp.state.base import WorkflowRepository
 
 
@@ -91,16 +92,15 @@ class WorkflowEngine:
                 },
             )
 
-            if plan.required_review:
-                record.review = HumanReviewRequest(
-                    risk_level=plan.risk_level,
-                    prompt=(
-                        f"Review {request.kind.value} workflow for order "
-                        f"{request.order.file_number} in {request.jurisdiction.key} "
-                        "before execution."
-                    ),
-                )
-                record.status = WorkflowStatus.NEEDS_HUMAN_REVIEW
+            record.review = HumanReviewRequest(
+                risk_level=plan.risk_level,
+                prompt=(
+                    f"Review {request.kind.value} workflow for order "
+                    f"{request.order.file_number} in {request.jurisdiction.key} "
+                    "before execution."
+                ),
+            )
+            record.status = WorkflowStatus.NEEDS_HUMAN_REVIEW
 
             record.add_audit(
                 "workflow.created",
@@ -124,7 +124,21 @@ class WorkflowEngine:
                 self._logger.warning("workflow.not_found", extra={"workflow_id": workflow_id})
                 return None
 
-            if record.review and record.review.status == ReviewStatus.PENDING:
+            if (
+                record.review is None
+                or record.review.status is ReviewStatus.NOT_REQUIRED
+                or (
+                    record.review.status is ReviewStatus.APPROVED
+                    and (
+                        not record.review.authenticated_reviewer
+                        or record.review.authenticated_reviewer != record.review.reviewer
+                    )
+                )
+            ):
+                record.review = HumanReviewRequest(
+                    prompt="An authenticated human must review this workflow before execution."
+                )
+            if record.review.status == ReviewStatus.PENDING:
                 record.status = WorkflowStatus.NEEDS_HUMAN_REVIEW
                 record.add_audit(
                     "workflow.paused_for_review",
@@ -145,28 +159,20 @@ class WorkflowEngine:
                 )
                 return await self._repository.save(record)
 
-            record.status = WorkflowStatus.RUNNING
-            record.touch()
-            await self._repository.save(record)
-
             for task in record.tasks:
+                task.normalize_legacy_placeholder()
                 if task.status != TaskStatus.QUEUED:
                     continue
-                task.status = TaskStatus.RUNNING
-                task.started_at = utc_now()
-                await self._repository.save(record)
-
-                task.status = TaskStatus.SUCCEEDED
-                task.completed_at = utc_now()
+                task.status = TaskStatus.WAITING_ON_EXTERNAL
                 task.result = {
                     **(task.result or {}),
-                    "execution_mode": "review_first_placeholder",
+                    "execution_mode": "planned",
                     "message": (
-                        "Task planned and marked complete; external integration is pluggable."
+                        "No executor is configured. This action awaits staff or external work."
                     ),
                 }
                 record.add_audit(
-                    "workflow.task_succeeded",
+                    "workflow.task_waiting_on_external",
                     payload={"task_id": task.id, "task_name": task.name},
                     trace_id=trace_id,
                 )
@@ -186,15 +192,20 @@ class WorkflowEngine:
         reviewer: str,
         notes: str | None = None,
         actor: AuditActor | None = None,
+        principal: AuthenticatedPrincipal | None = None,
     ) -> WorkflowRecord:
+        authenticated_actor = require_human_reviewer(principal)
+        if reviewer != authenticated_actor.actor_id:
+            raise PermissionError("Reviewer must match the authenticated human identity.")
+        if actor is not None and actor != authenticated_actor:
+            raise PermissionError("A review cannot override its authenticated audit identity.")
         with trace_span("workflow.submit_review", workflow_id=workflow_id) as trace_id:
             record = await self._repository.get(workflow_id)
             if record is None:
                 raise LookupError(f"Workflow not found: {workflow_id}")
             if record.review is None:
                 record.review = HumanReviewRequest(
-                    status=ReviewStatus.NOT_REQUIRED,
-                    prompt="No review was required for this workflow.",
+                    prompt="An authenticated human must review this workflow before execution.",
                 )
 
             if decision == ReviewDecision.APPROVE:
@@ -208,12 +219,12 @@ class WorkflowEngine:
                 record.status = WorkflowStatus.NEEDS_HUMAN_REVIEW
 
             record.review.reviewer = reviewer
+            record.review.authenticated_reviewer = authenticated_actor.actor_id
             record.review.decision_notes = notes
             record.review.resolved_at = utc_now()
             record.add_audit(
                 "workflow.review_submitted",
-                actor=actor
-                or AuditActor(actor_id=reviewer, actor_type="user", display_name=reviewer),
+                actor=authenticated_actor,
                 payload={"decision": decision.value, "notes": notes},
                 trace_id=trace_id or current_trace_id(),
             )

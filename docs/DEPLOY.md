@@ -17,11 +17,15 @@ server over Streamable HTTP. When the deployment is up, it serves:
 
 ## Before you deploy
 
-- **The server has no sign-in.** Anyone who has the URL can list and call its
-  tools. A tool that uses credentials you configure (PACER, SerpAPI, Anthropic,
-  the parcel proxy) uses them for whoever calls it, and PACER and the paid APIs
-  bill per use. Leave those unset on a public deployment, or deploy somewhere
-  only your own clients can reach.
+- **HTTP access is private and single tenant.** Set
+  `TITLE_MCP_MCP_ACCESS_TOKEN` to a unique, high-entropy instance credential of at
+  least 32 visible ASCII characters. All application requests require its Bearer
+  Authorization header; only `/healthz` is public. Missing configuration fails
+  closed. Use TLS and private ingress, and isolate each tenant's instance, state
+  and connector credentials. Authorized agents share access to the instance's
+  orders and paid APIs. This is not a multi-tenant sign-in or OAuth service. See
+  [Configuration](CONFIGURATION.md#server) for the separate trusted-human review
+  boundary. No credentials or deployment are configured by these instructions.
 - **State is kept in memory.** Workflow records are lost when the service
   restarts or redeploys, and free instances restart often. For durable state,
   set `TITLE_MCP_STATE_BACKEND=postgres` and `TITLE_MCP_POSTGRES_DSN` (see
@@ -64,18 +68,19 @@ Check that the deployment answers:
 curl https://<your-app>/healthz
 ```
 
-Then point an MCP client at `https://<your-app>/mcp`:
+Then point an MCP client supporting custom Authorization headers at
+`https://<your-app>/mcp`, with `Authorization: Bearer <instance-credential>`.
+URL-only client registration will receive HTTP 401. Never place the credential
+in a URL, shell history or a shared configuration file.
 
-- **Claude Code:** `claude mcp add --transport http titlemcp https://<your-app>/mcp`
-- **Claude (web and desktop):** add a custom connector with the same URL.
 - **MCP Inspector:** run `npx @modelcontextprotocol/inspector`, choose
-  Streamable HTTP, and enter the URL.
+  Streamable HTTP, enter the URL and configure the Authorization header.
 
 ## Build the image yourself
 
 ```bash
 docker build -t titlemcp .
-docker run -p 8000:8000 titlemcp
+docker run --env-file .env -p 127.0.0.1:8000:8000 titlemcp
 ```
 
 A release image is built with its version:

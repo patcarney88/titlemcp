@@ -20,6 +20,7 @@ from titlemcp_platform_iasworld import (
     build_auditor_source_connector,
     same_parcel,
 )
+from titlemcp_platform_iasworld.models import IasWorldAuditorParcelDetail, IasWorldTaxPages
 from titlemcp_platform_iasworld.tax import TAX_TABS, tax_parcel_from_pages
 
 BASE = "https://tax.sample.example/pt/"
@@ -273,6 +274,45 @@ class _Site:
 def _pages(config: IasWorldSiteConfig, site: _Site, parcel_id: str):
     client = IasWorldAuditorClient(config, opener=site)
     return client.tax_pages(parcel_id, TAX_TABS[config.tax_page])
+
+
+class UnknownAmountTests(unittest.TestCase):
+    def test_short_installment_row_cannot_disappear_from_a_paid_year(self):
+        pages = IasWorldTaxPages(
+            tabs={
+                "tax_details": IasWorldAuditorParcelDetail(
+                    raw_section_rows={
+                        "Summary of Current Year Taxes": [
+                            ["Year", "Half", "Tax", "Amount Paid", "Balance Due"],
+                            ["2026", "1st half", "$100", "-$100", "$0"],
+                            ["2026", "2nd half", "unreadable"],
+                        ],
+                    }
+                ),
+            }
+        )
+        parcel = tax_parcel_from_pages(SUMMARY, pages, read_on=TODAY)
+        self.assertIs(tax_status(parcel, TODAY), TaxStatus.UNKNOWN)
+        self.assertEqual(len(parcel.years[0].installments), 2)
+
+    def test_unknown_billed_year_cannot_disappear_beside_a_paid_year(self):
+        pages = IasWorldTaxPages(
+            tabs={
+                "tax_all": IasWorldAuditorParcelDetail(
+                    raw_section_rows={
+                        "Taxes Billed": [
+                            ["Year", "Amount"],
+                            ["2026", "$0"],
+                            ["2025", "unreadable"],
+                        ],
+                        "Payment Details": [["Year", "Tax"], ["2026", "$0"], ["2025", "$0"]],
+                    }
+                ),
+            }
+        )
+        parcel = tax_parcel_from_pages(BILLED, pages, read_on=TODAY)
+        self.assertIs(tax_status(parcel, TODAY), TaxStatus.UNKNOWN)
+        self.assertEqual(len(parcel.years), 2)
 
 
 class CurrentYearSummaryTests(unittest.TestCase):

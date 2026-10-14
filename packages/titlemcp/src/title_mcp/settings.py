@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import json
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -13,6 +15,7 @@ class TitleMCPSettings(BaseSettings):
         env_file=".env",
         env_prefix="TITLE_MCP_",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Title Operations MCP"
@@ -27,11 +30,28 @@ class TitleMCPSettings(BaseSettings):
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8000
     mcp_public_url: str | None = None
+    mcp_access_token: SecretStr | None = Field(default=None, exclude=True)
     inspector_url: str | None = None
     inspector_backend_url: str | None = None
     mcp_dns_rebinding_protection: bool = True
     mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
     mcp_allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    @field_validator("mcp_access_token", mode="before")
+    @classmethod
+    def blank_access_token(cls, value: Any) -> Any:
+        return None if value == "" else value
+
+    @field_validator("mcp_access_token")
+    @classmethod
+    def validate_access_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            raw = value.get_secret_value()
+            if len(raw) < 32 or any(not 33 <= ord(character) <= 126 for character in raw):
+                raise ValueError(
+                    "The HTTP access credential needs 32 or more visible ASCII characters."
+                )
+        return value
 
     @field_validator("mcp_allowed_hosts", "mcp_allowed_origins", mode="before")
     @classmethod
@@ -80,7 +100,7 @@ class TitleMCPSettings(BaseSettings):
     serpapi_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
 
     background_worker_concurrency: int = Field(default=4, ge=1, le=64)
-    default_human_review_required: bool = True
+    default_human_review_required: Literal[True] = True
     jurisdiction_config_path: str | None = None
     load_entry_point_capabilities: bool = True
     load_entry_point_adapters: bool = True

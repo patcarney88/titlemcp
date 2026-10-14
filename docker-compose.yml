@@ -14,6 +14,7 @@ services:
       TITLE_MCP_MCP_TRANSPORT: streamable-http
       TITLE_MCP_MCP_HOST: 0.0.0.0
       TITLE_MCP_MCP_PORT: 8000
+      TITLE_MCP_MCP_ACCESS_TOKEN: ${TITLE_MCP_MCP_ACCESS_TOKEN:-}
       TITLE_MCP_INSPECTOR_URL: ${TITLE_MCP_INSPECTOR_URL:-http://localhost:6274/}
       TITLE_MCP_INSPECTOR_BACKEND_URL: ${TITLE_MCP_INSPECTOR_BACKEND_URL:-http://titlemcp:8000/mcp}
       TITLE_MCP_MCP_ALLOWED_HOSTS: "${TITLE_MCP_MCP_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*,titlemcp:*,0.0.0.0:*}"
@@ -21,7 +22,7 @@ services:
       TITLE_MCP_STATE_BACKEND: ${TITLE_MCP_STATE_BACKEND:-memory}
       TITLE_MCP_POSTGRES_DSN: ${TITLE_MCP_DOCKER_POSTGRES_DSN:-postgresql://title_mcp:title_mcp@postgres:5432/title_mcp}
     ports:
-      - "${TITLE_MCP_PORT:-8000}:8000"
+      - "127.0.0.1:${TITLE_MCP_PORT:-8000}:8000"
     restart: unless-stopped
 
   mcp-inspector:

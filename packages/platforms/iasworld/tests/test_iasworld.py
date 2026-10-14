@@ -607,6 +607,47 @@ class IasWorldTaxStatusTests(unittest.TestCase):
         self.assertIs(tax_status(parcel, date(2026, 10, 10)), TaxStatus.PAST_DUE)
         self.assertIn("shows $1,510.00 currently due", " ".join(parcel.notes))
 
+    def test_unknown_second_half_does_not_collapse_to_a_paid_year(self):
+        record = PropertyAssessmentRecord(
+            source=PropertyAssessmentSource(source_id="us-oh-sample-auditor"),
+            jurisdiction=self.FRANKLIN_COUNTY,
+            parcel=PropertyAssessmentParcel(parcel_id="X01"),
+        )
+        for header, row in (
+            (
+                ["Year", "1st Half", "1st Half Payments", "2nd Half", "2nd Half Payments"],
+                ["2026", "$100", "$100", "", ""],
+            ),
+            (["Year", "1st Half", "1st Half Payments"], ["2026", "$100", "$100"]),
+        ):
+            with self.subTest(header=header):
+                parcel = tax_parcel_from_assessment(
+                    record, tax_summary=[header, row], read_on=date(2026, 10, 10)
+                )
+                self.assertIsNone(parcel.years[0].balance)
+                self.assertIs(tax_status(parcel, date(2026, 10, 10)), TaxStatus.UNKNOWN)
+
+    def test_unknown_prior_year_is_not_dropped_from_a_paid_current_year(self):
+        record = PropertyAssessmentRecord(
+            source=PropertyAssessmentSource(source_id="us-oh-sample-auditor"),
+            jurisdiction=self.FRANKLIN_COUNTY,
+            parcel=PropertyAssessmentParcel(parcel_id="X01"),
+        )
+        rows = [
+            [
+                "Year",
+                "Prior Year",
+                "Prior Year Payments",
+                "1st Half",
+                "1st Half Payments",
+                "2nd Half",
+                "2nd Half Payments",
+            ],
+            ["2026", "unreadable", "$0", "$100", "$100", "$100", "$100"],
+        ]
+        parcel = tax_parcel_from_assessment(record, tax_summary=rows, read_on=date(2026, 10, 10))
+        self.assertIs(tax_status(parcel, date(2026, 10, 10)), TaxStatus.UNKNOWN)
+
     def test_the_record_read_from_the_parcels_page_is_the_one_used(self) -> None:
         hit_only = PropertyAssessmentRecord(
             source=PropertyAssessmentSource(source_id="x"), jurisdiction=self.FRANKLIN_COUNTY

@@ -133,6 +133,15 @@ titlemcp-server
 
 HTTP transport:
 
+First provision `TITLE_MCP_MCP_ACCESS_TOKEN` in private local configuration
+(at least 32 visible ASCII characters). HTTP clients must send its
+`Authorization: Bearer <instance-credential>` header on every application
+request, including `/` and `/readyz`. A blank value denies application requests;
+`/healthz` remains public. Do not put credentials in URLs. This mode is private
+and single tenant: separate instances, repositories and connector credentials
+are required for separate trust domains. It does not provide OAuth or per-order
+permissions.
+
 ```bash
 TITLE_MCP_MCP_TRANSPORT=streamable-http titlemcp-server
 ```
@@ -152,6 +161,10 @@ PYTHONPATH=packages/titlemcp/src .venv/bin/python packages/titlemcp/examples/mcp
 The client lists MCP tools and creates a municipal lien search workflow.
 
 ## MCP Inspector Support
+
+Configure the instance Authorization header in Inspector. Its own proxy session
+token is separate from TitleMCP's instance credential. Catalog links omit URL
+credentials and query values.
 
 In Streamable HTTP mode, MCP Inspector can browse tools, resources, and prompts.
 TitleMCP exposes read-only resources for server info, sanitized runtime config,
@@ -312,7 +325,6 @@ The server exposes a generic `start_title_workflow` tool plus convenience tools:
 - `generate_checklist_packet`
 - `get_workflow_status`
 - `list_workflows`
-- `submit_human_review`
 - `list_title_capabilities`
 - `list_source_connectors`
 - `list_vendor_connectors`

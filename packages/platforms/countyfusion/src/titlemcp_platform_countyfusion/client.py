@@ -33,11 +33,13 @@ from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from title_mcp.domain.recorder import (
+    IncompleteRecorderSearch,
     InstrumentKind,
     InstrumentReference,
     RecordedInstrument,
     classify_instrument,
 )
+
 from titlemcp_platform_countyfusion.config import CountyFusionSiteConfig
 
 USER_AGENT = (
@@ -332,21 +334,30 @@ class CountyFusionClient:
             "GET", urljoin(self.config.base_url + "/search/searchExecute.do", location)
         )
         found: list[RecordedInstrument] = []
-        for _ in range(pages):
+        for page_index in range(pages):
             location = answer.headers.get("Location", "")
             if "SearchResultsView.jsp" not in location:
-                # No results: the site answers with a page saying so.
-                return found
+                if not found and _NOTHING_FOUND in answer.text:
+                    return []
+                raise IncompleteRecorderSearch("The county did not return a complete result page.")
             state = {key: values[0] for key, values in parse_qs(urlparse(location).query).items()}
             listing = self._request(
                 "GET",
                 f"/search/{self.config.county_key}/docs_SearchResultList.jsp",
                 params={"scrollPos": "0", "searchSessionId": _SEARCH_SESSION},
             )
-            found.extend(self.rows(listing.text))
+            rows = self.rows(listing.text)
             shown = re.search(r"Displaying (\d+)-(\d+) of (\d+)", state.get("navStateDisplay", ""))
-            if not shown or int(shown.group(2)) >= int(shown.group(3)):
+            if shown is None:
+                raise IncompleteRecorderSearch("The county did not report search completeness.")
+            start, end, total = (int(value) for value in shown.groups())
+            if start != len(found) + 1 or end > total or end - start + 1 != len(rows):
+                raise IncompleteRecorderSearch("The county returned inconsistent result counts.")
+            found.extend(rows)
+            if end == total:
                 return found
+            if page_index + 1 == pages:
+                break
             answer = self._request(
                 "GET",
                 "/search/searchResults.do",
@@ -359,7 +370,9 @@ class CountyFusionClient:
                     "startCursor": state.get("startCursor", "0"),
                 },
             )
-        return found
+        raise IncompleteRecorderSearch(
+            "The county search exceeded its page limit. Narrow it before judging releases."
+        )
 
     def _read_detail(self, inst_id: str) -> RecordedInstrument:
         answer = self._request(

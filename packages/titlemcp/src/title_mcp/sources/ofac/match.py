@@ -248,12 +248,23 @@ def _years(values: list[str]) -> set[int]:
     return found
 
 
+def _candidate_priority(candidate: Candidate) -> tuple[bool, float, str, str]:
+    return (
+        candidate.outcome is not Outcome.POTENTIAL_MATCH,
+        -candidate.score,
+        candidate.uid,
+        candidate.matched_name,
+    )
+
+
 class Screener:
     """An index over a set of list entries; screen as many parties as needed against it."""
 
     def __init__(self, entries: list[SanctionsEntry], thresholds: Thresholds | None = None) -> None:
         self.entries = entries
         self.thresholds = thresholds or Thresholds()
+        if self.thresholds.max_candidates < 1:
+            raise ValueError("max_candidates must be at least one.")
         self.forms: list[_Form] = []
         self._by_token: dict[str, set[int]] = defaultdict(set)
         self._by_key: dict[str, set[int]] = defaultdict(set)
@@ -336,14 +347,16 @@ class Screener:
             candidate = self._score(party, words, entity_party, entry, form, near_misses=near)
             if candidate is None:
                 continue
-            if form.entry not in best or candidate.score > best[form.entry].score:
+            if form.entry not in best or (
+                _candidate_priority(candidate) < _candidate_priority(best[form.entry])
+            ):
                 best[form.entry] = candidate
-        ranked = sorted(best.values(), key=lambda c: -c.score)[: self.thresholds.max_candidates]
+        ranked = sorted(best.values(), key=_candidate_priority)[: self.thresholds.max_candidates]
         outcome = (
             Outcome.POTENTIAL_MATCH
-            if any(c.outcome is Outcome.POTENTIAL_MATCH for c in ranked)
+            if any(c.outcome is Outcome.POTENTIAL_MATCH for c in best.values())
             else Outcome.LIKELY_FALSE_POSITIVE
-            if ranked
+            if best
             else Outcome.NO_MATCH
         )
         raw = [t for t in fold(party.name).split() if t]
@@ -361,6 +374,8 @@ class Screener:
             index_hits=index_hits,
             listed_names_compared=len(compared),
             listed_names_total=len(self.forms),
+            candidates_total=len(best),
+            candidates_omitted=max(0, len(best) - len(ranked)),
             nearest_below_review=sorted(
                 (n for e_i, n in near.items() if e_i not in best), key=lambda n: -n.score
             )[:3],

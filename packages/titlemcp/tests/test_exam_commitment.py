@@ -1001,6 +1001,49 @@ class CommitmentRenderTests(unittest.TestCase):
         self.assertTrue(result.draft.requires_human_review)
 
 
+class ReconciliationBindingTests(unittest.TestCase):
+    def test_mutated_same_file_content_requires_fresh_reconciliation(self):
+        package = sample_package()
+        reconciler = ExamReconciliationService()
+        receipt = reconciler.reconcile(package)
+        self.assertIs(receipt.status, ReconciliationStatus.GREEN)
+        package.mortgages[0].original_amount = Decimal("999999")
+        renderer = CommitmentRenderService()
+        stale = renderer.render(
+            package=package, reconciliation=receipt, clause_set=ohio_default_clause_set()
+        )
+        self.assertIsNone(stale.draft)
+        self.assertIn("changed", stale.refusal_reason)
+        fresh = renderer.render(
+            package=package,
+            reconciliation=reconciler.reconcile(package),
+            clause_set=ohio_default_clause_set(),
+        )
+        self.assertIsNotNone(fresh.draft, fresh.refusal_reason)
+
+    def test_legacy_receipt_without_digest_is_refused(self):
+        package = sample_package()
+        receipt = ExamReconciliationService().reconcile(package)
+        receipt.package_sha256 = None
+        result = CommitmentRenderService().render(
+            package=package,
+            reconciliation=receipt,
+            clause_set=ohio_default_clause_set(),
+        )
+        self.assertIsNone(result.draft)
+
+    def test_equivalent_serialized_content_keeps_its_binding(self):
+        package = sample_package()
+        receipt = ExamReconciliationService().reconcile(package)
+        equivalent = ExamPackage.model_validate_json(package.model_dump_json())
+        result = CommitmentRenderService().render(
+            package=equivalent,
+            reconciliation=receipt,
+            clause_set=ohio_default_clause_set(),
+        )
+        self.assertIsNotNone(result.draft, result.refusal_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
 

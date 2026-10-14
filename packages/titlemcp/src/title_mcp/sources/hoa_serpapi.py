@@ -4,13 +4,13 @@ import asyncio
 import logging
 import re
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
+from email.message import Message
 from html.parser import HTMLParser
+from http.client import HTTPException
 from typing import Any, Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -28,6 +28,7 @@ from title_mcp.sources.base import (
     SourceResult,
     SourceResultStatus,
 )
+from title_mcp.sources.public_http import BODY_LIMIT, fetch_public_page
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ _THIRD_PARTY_DOMAINS = (
     "buzzfile.com",
 )
 
-_PAGE_BODY_BYTE_LIMIT = 1_500_000
+_PAGE_BODY_BYTE_LIMIT = BODY_LIMIT
 _PAGE_TEXT_CHAR_LIMIT = 20_000
 _PAGE_FETCH_USER_AGENT = (
     "Mozilla/5.0 (compatible; TitleMCP-HOA/1.0; +https://github.com/anthropics)"
@@ -161,11 +162,7 @@ class SerpApiHoaContactClient:
     def hoa_contact_search(self, query: HoaContactSearchQuery) -> HoaContactSearchRecord:
         start = time.time()
         query = HoaContactSearchQuery.model_validate(query)
-        LOGGER.info(
-            "Searching SerpAPI for HOA contact information: hoa_name=%r state=%r.",
-            query.hoa_name,
-            query.state,
-        )
+        LOGGER.info("Searching SerpAPI for HOA contact information.")
 
         domain_params = build_hoa_domain_search_params(query)
         domain_data = self._search(domain_params)
@@ -180,10 +177,7 @@ class SerpApiHoaContactClient:
         ]
 
         if official_domain:
-            LOGGER.info(
-                "SerpAPI HOA search selected official domain candidate: %s",
-                official_domain,
-            )
+            LOGGER.info("SerpAPI HOA search selected a domain candidate.")
             contact_params = build_hoa_site_contact_search_params(query, official_domain)
             searches.append(
                 {
@@ -215,16 +209,15 @@ class SerpApiHoaContactClient:
 
         target_url = _first_result_url(record)
         if target_url:
-            LOGGER.info(
-                "Fetching top SerpAPI result for LLM contact extraction: %s",
-                target_url,
-            )
+            LOGGER.info("Fetching the selected HOA result for contact extraction.")
             fetcher = self._page_fetcher or (
                 lambda url: _fetch_page_text(url, timeout=self.page_fetch_timeout)
             )
             record = record.model_copy(update={"first_result_page": fetcher(target_url)})
 
-        return record
+        return HoaContactSearchRecord.model_validate(
+            _redact_serpapi_payload(record.model_dump(mode="json"), secret=self.api_key)
+        )
 
     def _search(self, params: dict[str, Any]) -> dict[str, Any]:
         request_params = {**params, "api_key": self.api_key}
@@ -236,16 +229,23 @@ class SerpApiHoaContactClient:
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise SerpApiClientError(f"SerpAPI request failed: {exc}") from exc
+            response = exc.response
+            status = response.status_code if response is not None else None
+            message = (
+                f"SerpAPI request failed (HTTP {status})."
+                if isinstance(status, int)
+                else "SerpAPI request failed."
+            )
+            raise SerpApiClientError(message) from None
 
         try:
             data = response.json()
-        except ValueError as exc:
-            raise SerpApiClientError("SerpAPI returned a non-JSON response.") from exc
+        except ValueError:
+            raise SerpApiClientError("SerpAPI returned a non-JSON response.") from None
         if not isinstance(data, dict):
             raise SerpApiClientError("SerpAPI returned an unexpected response shape.")
         if data.get("error"):
-            raise SerpApiClientError(str(data["error"]))
+            raise SerpApiClientError("SerpAPI reported a search error.")
         return data
 
 
@@ -293,11 +293,18 @@ class HoaContactSerpApiSourceConnector(SourceConnector):
         try:
             search_query = HoaContactSearchQuery.model_validate(query.criteria)
             record = await asyncio.to_thread(client.hoa_contact_search, search_query)
-        except Exception as exc:
+            record = HoaContactSearchRecord.model_validate(
+                _redact_serpapi_payload(
+                    record.model_dump(mode="json"), secret=self.settings.serpapi_api_key
+                )
+            )
+        except Exception:
             return SourceResult(
                 source_id=self.source_id,
                 status=SourceResultStatus.FAILED,
-                warnings=[f"HOA contact search failed: {exc}"],
+                warnings=[
+                    "HOA contact search failed. Check the source configuration or availability."
+                ],
             )
 
         status = (
@@ -941,26 +948,32 @@ def _unique(values: Any) -> list[str]:
     return result
 
 
-def _redact_serpapi_payload(value: Any) -> Any:
+def _redact_serpapi_payload(value: Any, *, secret: str | None = None) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
+            safe_key = _redact_serpapi_payload(key, secret=secret)
             if key.lower() in _SENSITIVE_QUERY_KEYS:
-                redacted[key] = "***"
+                redacted[safe_key] = "***"
             else:
-                redacted[key] = _redact_serpapi_payload(item)
+                redacted[safe_key] = _redact_serpapi_payload(item, secret=secret)
         return redacted
     if isinstance(value, list):
-        return [_redact_serpapi_payload(item) for item in value]
+        return [_redact_serpapi_payload(item, secret=secret) for item in value]
     if isinstance(value, str):
+        if secret and secret in unquote(value):
+            return "[redacted]"
         return _redact_serpapi_url(value)
     return value
 
 
 def _redact_serpapi_url(value: str) -> str:
-    if "api_key=" not in value:
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return "[invalid source value]"
+    if not parts.query:
         return value
-    parts = urlsplit(value)
     query = urlencode(
         [
             (key, "***" if key.lower() in _SENSITIVE_QUERY_KEYS else item)
@@ -1032,26 +1045,21 @@ class _HoaPageTextExtractor(HTMLParser):
 
 def _fetch_page_text(url: str, *, timeout: float) -> HoaPageFetch:
     started = time.time()
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": _PAGE_FETCH_USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-            "Accept-Language": "en-US,en;q=0.8",
-        },
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            content_type = response.headers.get("Content-Type")
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = response.read(_PAGE_BODY_BYTE_LIMIT + 1)
-            status_code = response.status
-            final_url = response.geturl()
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        LOGGER.warning("Failed to fetch top HOA result %s: %s", url, exc)
+        fetched = fetch_public_page(url, timeout=timeout)
+        content_type = fetched.content_type
+        headers = Message()
+        if content_type:
+            headers["Content-Type"] = content_type
+        charset = headers.get_content_charset() or "utf-8"
+        body = fetched.body
+        status_code = fetched.status
+        final_url = fetched.url
+    except (HTTPException, OSError, ValueError):
+        LOGGER.warning("The selected HOA page could not be fetched safely.")
         return HoaPageFetch(
             url=url,
-            error=str(exc),
+            error="Public page fetch failed or its destination was rejected.",
             duration_seconds=round(time.time() - started, 3),
         )
 
@@ -1068,14 +1076,14 @@ def _fetch_page_text(url: str, *, timeout: float) -> HoaPageFetch:
     try:
         extractor.feed(html)
         extractor.close()
-    except Exception as exc:  # html.parser raises a variety of exceptions on malformed input
-        LOGGER.warning("HTML parse failed for %s: %s", url, exc)
+    except Exception:  # html.parser can reject malformed input
+        LOGGER.warning("The selected HOA page could not be parsed.")
         return HoaPageFetch(
             url=url,
             final_url=final_url,
             status_code=status_code,
             content_type=content_type,
-            error=f"HTML parsing failed: {exc}",
+            error="HTML parsing failed.",
             duration_seconds=round(time.time() - started, 3),
         )
 

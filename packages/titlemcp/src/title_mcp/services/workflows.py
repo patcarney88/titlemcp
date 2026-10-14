@@ -15,6 +15,7 @@ from title_mcp.domain.models import (
     WorkflowStatus,
 )
 from title_mcp.domain.responses import WorkflowSummary, WorkflowToolResponse
+from title_mcp.security import AuthenticatedPrincipal
 from title_mcp.state.base import WorkflowRepository
 from title_mcp.workflows.engine import WorkflowEngine
 
@@ -50,7 +51,7 @@ class WorkflowService:
             require_human_review=require_human_review,
             requested_by=AuditActor(
                 actor_id=requested_by,
-                actor_type="user",
+                actor_type="external_service",
                 display_name=requested_by,
             ),
         )
@@ -84,12 +85,14 @@ class WorkflowService:
         decision: ReviewDecision,
         reviewer: str,
         notes: str | None = None,
+        principal: AuthenticatedPrincipal | None = None,
     ) -> WorkflowRecord:
         return await self._engine.submit_review(
             workflow_id,
             decision=decision,
             reviewer=reviewer,
             notes=notes,
+            principal=principal,
         )
 
     @staticmethod

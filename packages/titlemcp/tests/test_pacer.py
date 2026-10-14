@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
@@ -11,6 +12,7 @@ from title_mcp.sources.pacer import (
     PacerBankruptcySearchRecord,
     PacerBankruptcySearchSummary,
     PacerBankruptcySourceConnector,
+    PacerClient,
     build_bankruptcy_party_search_criteria,
     clean_business_name,
     clean_last_name_for_pacer,
@@ -125,6 +127,8 @@ class _FakePacerClient:
             },
             search_criteria={"lastName": "Smith", "ssn": "***-**-3333"},
             result_count=1,
+            complete=True,
+            total_result_count=1,
             cases=[
                 PacerBankruptcyCaseRecord(
                     party_name="John Smith",
@@ -147,6 +151,69 @@ class _FakePacerClient:
             ),
             duration_seconds=0.01,
         )
+
+
+class PacerCompletenessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_paginated_or_missing_metadata_never_clears_a_search(self):
+        page = {
+            "number": 0,
+            "totalPages": 2,
+            "totalElements": 55,
+            "numberOfElements": 1,
+            "first": True,
+            "last": False,
+        }
+        for metadata in (page, None, {**page, "totalPages": "2"}):
+            with self.subTest(metadata=metadata):
+                client = PacerClient("synthetic-user", "synthetic-passphrase")
+                client.auth_token = str(id(client))
+                response = {"content": [{"lastName": "Example", "dateTermed": "2025-01-01"}]}
+                if metadata is not None:
+                    response["pageInfo"] = metadata
+                with mock.patch.object(
+                    client, "advanced_party_search", return_value=response
+                ) as call:
+                    result = await PacerBankruptcySourceConnector(client=client).query(
+                        SourceQuery(
+                            jurisdiction=Jurisdiction(country="US"),
+                            kind=SourceKind.COURT,
+                            criteria={"last_name": "Example"},
+                        )
+                    )
+                self.assertIs(result.status, SourceResultStatus.PARTIAL)
+                record = result.records[0]
+                self.assertFalse(record["complete"])
+                self.assertTrue(record["summary"]["title_officer_review_required"])
+                self.assertNotIn("REVIEW IS NOT REQUIRED", record["summary"]["text"])
+                self.assertTrue(result.warnings)
+                call.assert_called_once()
+
+    async def test_proven_complete_empty_page_returns_no_results_with_review_required(self):
+        client = PacerClient("synthetic-user", "synthetic-passphrase")
+        client.auth_token = str(id(client))
+        response = {
+            "content": [],
+            "pageInfo": {
+                "number": 0,
+                "totalPages": 0,
+                "totalElements": 0,
+                "numberOfElements": 0,
+                "first": True,
+                "last": True,
+            },
+        }
+        with mock.patch.object(client, "advanced_party_search", return_value=response):
+            result = await PacerBankruptcySourceConnector(client=client).query(
+                SourceQuery(
+                    jurisdiction=Jurisdiction(country="US"),
+                    kind=SourceKind.COURT,
+                    criteria={"last_name": "Example"},
+                )
+            )
+        self.assertIs(result.status, SourceResultStatus.NO_RESULTS)
+        self.assertTrue(result.records[0]["complete"])
+        self.assertEqual(result.records[0]["total_result_count"], 0)
+        self.assertTrue(result.records[0]["summary"]["title_officer_review_required"])
 
 
 if __name__ == "__main__":

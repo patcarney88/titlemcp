@@ -9,6 +9,7 @@ from typing import Any
 
 from title_mcp.domain.auditor import PropertyAssessmentRecord
 from title_mcp.domain.tax import TaxInstallment, TaxParcel, TaxYear
+
 from titlemcp_platform_iasworld.config import IasWorldSiteConfig, TaxPage
 from titlemcp_platform_iasworld.models import IasWorldTaxPages
 
@@ -114,14 +115,13 @@ def _summary_years(rows: list[list[str]]) -> list[TaxYear]:
                 balance=_owed(_money(cells.get(name)), _money(cells.get(f"{name} payments"))),
             )
             for name, label in (("1st half", "1st half"), ("2nd half", "2nd half"))
-            if name in cells
         ]
         years.append(
             TaxYear(
                 tax_year=tax_year,
                 billed=_total(installment.billed for installment in installments),
                 paid=_total(installment.paid for installment in installments),
-                balance=_total(installment.balance for installment in installments),
+                balance=_balance_total(installment.balance for installment in installments),
                 installments=installments,
             )
         )
@@ -129,7 +129,7 @@ def _summary_years(rows: list[list[str]]) -> list[TaxYear]:
             _money(cells.get("prior year")),
             _money(cells.get("prior year payments")),
         )
-        if prior:
+        if "prior year" in header and (prior is None or prior_paid is None or prior != 0):
             years.append(
                 TaxYear(
                     tax_year=tax_year - 1,
@@ -160,8 +160,16 @@ def _owed(billed: Decimal | None, paid: Decimal | None) -> Decimal | None:
 
 
 def _total(values) -> Decimal | None:
-    known = [value for value in values if value is not None]
-    return sum(known, Decimal(0)) if known else None
+    amounts = [value for value in values if value is not None]
+    return sum(amounts, Decimal(0)) if amounts else None
+
+
+def _balance_total(values) -> Decimal | None:
+    """A balance total cannot omit an unknown installment."""
+    amounts = list(values)
+    if not amounts or any(value is None for value in amounts):
+        return None
+    return sum(amounts, Decimal(0))
 
 
 def _money(value: Any) -> Decimal | None:
@@ -220,17 +228,17 @@ def _current_year_summary(
     halves: dict[int, list[tuple[TaxInstallment, Decimal | None]]] = {}
     for row in rows[1:]:
         tax_year = _year(_cell(row, 0))
-        if tax_year is None or len(row) <= balance_at:
+        if tax_year is None:
             continue
         earlier = halves.setdefault(tax_year, [])
         installment = TaxInstallment(
             label=_installment_label(_cell(row, 1), len(earlier)),
             due_on=_due_on(config, tax_year, len(earlier)),
-            billed=_total(_money(row[i]) for i in charge_at),
-            paid=_positive(_money(row[paid_at])),
-            balance=_money(row[balance_at]),
+            billed=_total(_money(_cell(row, i)) for i in charge_at),
+            paid=_positive(_money(_cell(row, paid_at))),
+            balance=_money(_cell(row, balance_at)),
         )
-        earlier.append((installment, _total(_money(row[i]) for i in penalty_at)))
+        earlier.append((installment, _total(_money(_cell(row, i)) for i in penalty_at)))
     years = [
         _year_of(
             tax_year,
@@ -255,10 +263,10 @@ def _billed_and_payments(
     The page doesn't show installment amounts, so with due dates configured each
     installment is taken as an equal share of the bill, paid in order.
     """
-    billed: dict[int, Decimal] = {}
+    billed: dict[int, Decimal | None] = {}
     for row in (pages.section("Taxes Billed") or [])[1:]:
         tax_year, amount = _year(_cell(row, 0)), _money(_cell(row, 1))
-        if tax_year is not None and amount is not None:
+        if tax_year is not None:
             billed[tax_year] = amount
     if not billed:
         return [], ["The county's page showed no tax billed."]
@@ -266,27 +274,37 @@ def _billed_and_payments(
     header = _header(payments)
     year_at, tax_at = _column(header, "year"), _column(header, "tax")
     extra_at = [_column(header, name) for name in ("interest", "penalty", "cost")]
-    paid: dict[int, Decimal] = {}
+    paid: dict[int, Decimal | None] = {}
     penalties: dict[int, Decimal] = {}
     if year_at is not None and tax_at is not None:
         for row in payments[1:]:
             tax_year = _year(_cell(row, year_at))
             if tax_year is None:
                 continue
-            paid[tax_year] = paid.get(tax_year, Decimal(0)) + (_money(_cell(row, tax_at)) or 0)
+            amount = _money(_cell(row, tax_at))
+            previous = paid.get(tax_year, Decimal(0))
+            paid[tax_year] = (
+                previous + amount if previous is not None and amount is not None else None
+            )
             extra = _total(_money(_cell(row, at)) for at in extra_at if at is not None)
             penalties[tax_year] = penalties.get(tax_year, Decimal(0)) + (extra or 0)
     years = []
     for tax_year, amount in billed.items():
-        year_paid = paid.get(tax_year, Decimal("0.00"))
+        year_paid = paid.get(
+            tax_year, Decimal("0.00") if year_at is not None and tax_at is not None else None
+        )
         years.append(
             TaxYear(
                 tax_year=tax_year,
                 billed=amount,
                 paid=year_paid,
                 penalties=penalties.get(tax_year) or None,
-                balance=max(amount - year_paid, Decimal("0.00")),
-                installments=_equal_shares(config, tax_year, amount, year_paid),
+                balance=_owed(amount, year_paid),
+                installments=(
+                    _equal_shares(config, tax_year, amount, year_paid)
+                    if amount is not None and year_paid is not None
+                    else []
+                ),
             )
         )
     notes = []
@@ -565,7 +583,7 @@ def _year_of(
         billed=_total(installment.billed for installment in installments),
         paid=_total(installment.paid for installment in installments),
         penalties=penalties,
-        balance=_total(installment.balance for installment in installments),
+        balance=_balance_total(installment.balance for installment in installments),
         installments=installments,
         notes=notes or [],
     )

@@ -107,6 +107,7 @@ class ParcelChain(BaseModel):
     parcel_id: str
     documents_searched: int = 0
     documents_on_parcel: int = 0
+    complete: bool = True
     acquisition: ChainDocument | None = None
     open_liens: list[OpenLien] = Field(default_factory=list)
     released: list[str] = Field(default_factory=list)
@@ -152,8 +153,16 @@ def build(
     parcel_id: str,
     owner_name: str,
     documents: list[RecorderDocument],
+    complete: bool = True,
 ) -> ParcelChain:
-    """Assemble the chain for one parcel out of a countywide name search."""
+    """Assemble a chain only when the countywide result set is complete."""
+    if not complete:
+        return ParcelChain(
+            parcel_id=parcel_id,
+            documents_searched=len(documents),
+            complete=False,
+            notes=["The search is incomplete; no acquisition or lien conclusions were assembled."],
+        )
     scoped = [document for document in documents if on_parcel(document, parcel_id)]
     chain = [
         ChainDocument(

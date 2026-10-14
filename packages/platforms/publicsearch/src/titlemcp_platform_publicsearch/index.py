@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import date
 
 from title_mcp.domain.recorder import (
+    IncompleteRecorderSearch,
     RecordedInstrument,
     index_search_name,
     normalize_instrument_number,
 )
+
 from titlemcp_platform_publicsearch.client import PublicSearchClient, PublicSearchQuery
 
 #: A name search for a common borrower returns hundreds of documents across a
@@ -42,7 +44,7 @@ class PublicSearchIndex:
         # The quick search has no book-and-page form. Counties on PublicSearch
         # have numbered instruments for decades, so a mortgage still open is
         # almost always found by its number.
-        return []
+        raise IncompleteRecorderSearch("This county's book-and-page search is not supported.")
 
     async def citing(self, instrument_number: str) -> list[RecordedInstrument]:
         found = await self._search(
@@ -74,6 +76,11 @@ class PublicSearchIndex:
         self, query: PublicSearchQuery, *, excerpt_for: str | None = None
     ) -> list[RecordedInstrument]:
         found = await self._client.search(query, excerpt_for=excerpt_for)
+        if found.record_count != len(found.documents):
+            raise IncompleteRecorderSearch(
+                f"The county matched {found.record_count} documents but returned "
+                f"{len(found.documents)}. Narrow the search; its release status is incomplete."
+            )
         for document in found.documents:
             self._seen.setdefault(document.number, document)
         return found.documents

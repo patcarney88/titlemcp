@@ -12,7 +12,6 @@ from title_mcp.domain.models import (
     US_STATE_NAMES,
     Address,
     Jurisdiction,
-    ReviewDecision,
     WorkflowKind,
     WorkflowStatus,
 )
@@ -752,28 +751,7 @@ def register_core_tools(mcp: MCPServer, platform: TitleMCPPlatform) -> None:
             workflows=[platform.workflows.summarize(record) for record in records]
         ).model_dump(mode="json")
 
-    @mcp.tool(
-        title="Submit Human Review",
-        annotations=_state_changing("Submit Human Review"),
-    )
-    async def submit_human_review(
-        workflow_id: str,
-        decision: ReviewDecision,
-        reviewer: str,
-        notes: str | None = None,
-    ) -> dict[str, Any]:
-        """Record human review approval, rejection, or requested changes for a workflow."""
-        await ensure_ready()
-        record = await platform.workflows.submit_review(
-            workflow_id=workflow_id,
-            decision=decision,
-            reviewer=reviewer,
-            notes=notes,
-        )
-        return platform.workflows.to_tool_response(
-            record,
-            "Human review recorded.",
-        ).model_dump(mode="json")
+    # Review decisions enter through a trusted human host, never an agent tool.
 
     @mcp.tool(
         title="List Title Capabilities",

@@ -29,7 +29,7 @@ class TaxStatus(StrEnum):
     DUE = "due"
     #: Something is owed after its due date, or on a year before the latest.
     PAST_DUE = "past_due"
-    #: The collector has the parcel but shows no balances to judge by.
+    #: The collector has the parcel but the displayed balances are incomplete.
     UNKNOWN = "unknown"
     PARCEL_NOT_FOUND = "parcel_not_found"
 
@@ -134,9 +134,24 @@ class PropertyTaxStatusRecord(BaseModel):
     other_charges: list[TaxCharge] = Field(default_factory=list)
     #: Everything still owed across the years and charges shown.
     total_balance: Decimal | None = None
+    balances_complete: bool = False
     notes: list[str] = Field(default_factory=list)
     requires_human_review: bool = True
     source_specific: dict[str, Any] = Field(default_factory=dict)
+
+
+def balances_complete(parcel: TaxParcel) -> bool:
+    """Whether every displayed year, installment and charge has a known balance."""
+    entries = [*parcel.years, *parcel.other_charges]
+    return (
+        bool(entries)
+        and all(entry.balance is not None for entry in entries)
+        and all(
+            installment.balance is not None
+            for year in parcel.years
+            for installment in year.installments
+        )
+    )
 
 
 def tax_status(parcel: TaxParcel, today: date) -> TaxStatus:
@@ -149,7 +164,7 @@ def tax_status(parcel: TaxParcel, today: date) -> TaxStatus:
     if not known:
         return TaxStatus.UNKNOWN
     if not owed_years and not owed_charges:
-        return TaxStatus.PAID
+        return TaxStatus.PAID if balances_complete(parcel) else TaxStatus.UNKNOWN
     latest = max(year.tax_year for year in parcel.years) if parcel.years else None
     for year in owed_years:
         if latest is not None and year.tax_year < latest:
@@ -167,7 +182,9 @@ def tax_status(parcel: TaxParcel, today: date) -> TaxStatus:
 
 
 def total_balance(parcel: TaxParcel) -> Decimal | None:
-    balances = [year.balance for year in parcel.years if year.balance is not None] + [
-        charge.balance for charge in parcel.other_charges if charge.balance is not None
+    if not balances_complete(parcel):
+        return None
+    balances = [year.balance for year in parcel.years] + [
+        charge.balance for charge in parcel.other_charges
     ]
-    return sum(balances, Decimal(0)) if balances else None
+    return sum((balance for balance in balances if balance is not None), Decimal(0))

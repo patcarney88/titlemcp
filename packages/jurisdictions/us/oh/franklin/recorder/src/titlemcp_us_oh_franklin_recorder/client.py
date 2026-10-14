@@ -225,10 +225,21 @@ class RecorderProtocolError(RuntimeError):
 def _to_result(payload: dict[str, Any]) -> RecorderSearchResult:
     meta = payload.get("meta") or {}
     by_hash = (payload.get("data") or {}).get("byHash") or {}
+    raw_count = meta.get("numRecords")
+    if (
+        isinstance(raw_count, bool)
+        or not isinstance(raw_count, (int, str))
+        or not str(raw_count).isascii()
+        or not str(raw_count).isdigit()
+    ):
+        raise RecorderProtocolError("The county did not provide a valid total result count.")
+    record_count = int(raw_count)
+    if record_count < len(by_hash):
+        raise RecorderProtocolError("The county returned inconsistent result counts.")
     statistics = (meta.get("statistics") or {}).get("docTypes") or []
     return RecorderSearchResult(
         documents=[RecorderDocument.from_payload(row) for row in by_hash.values()],
-        record_count=int(meta.get("numRecords") or 0),
+        record_count=record_count,
         document_type_counts={
             _text(entry.get("label")): int(entry.get("hits") or 0) for entry in statistics
         },

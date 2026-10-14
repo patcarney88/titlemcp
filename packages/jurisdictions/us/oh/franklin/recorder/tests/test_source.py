@@ -6,6 +6,8 @@ import json
 import pathlib
 import unittest
 
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_us_oh_franklin_recorder.client import (
     RecorderProtocolError,
     RecorderSearchQuery,
@@ -13,9 +15,6 @@ from titlemcp_us_oh_franklin_recorder.client import (
     _to_result,
 )
 from titlemcp_us_oh_franklin_recorder.sources import FranklinRecorderSourceConnector
-
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "name_search.json"
 FRANKLIN = Jurisdiction(country="US", state="OH", county="Franklin County")
@@ -140,6 +139,22 @@ class ParsingTests(unittest.TestCase):
             for name in document.grantors + document.grantees:
                 self.assertNotIn("<em>", name)
             self.assertNotIn("<em>", document.volume)
+
+
+class CompletenessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_truncated_chain_has_no_open_lien_or_release_conclusion(self):
+        found = from_fixture()
+        found.record_count = len(found.documents) + 20
+        source = FranklinRecorderSourceConnector(client=FakeRecorderClient(found))
+        result = await source.query(ask(party_name="Example Eleanor V", parcel_id="030-000526-00"))
+        self.assertIs(result.status, SourceResultStatus.PARTIAL)
+        [chain] = result.records
+        self.assertFalse(chain["complete"])
+        self.assertFalse(chain["open_liens"])
+
+    def test_missing_result_count_is_rejected(self):
+        with self.assertRaises(RecorderProtocolError):
+            _to_result({"data": {"byHash": {}}})
 
 
 if __name__ == "__main__":

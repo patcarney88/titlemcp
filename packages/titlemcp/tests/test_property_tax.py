@@ -6,7 +6,6 @@ from datetime import date
 from decimal import Decimal
 
 from pydantic import ValidationError
-
 from title_mcp.adapters.base import JurisdictionScope
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.tax import (
@@ -277,6 +276,35 @@ class PropertyTaxToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["status"], "requires_configuration")
+
+
+class IncompleteBalanceTests(unittest.TestCase):
+    def test_zero_plus_unknown_never_means_paid_or_zero_total(self):
+        for parcel in (
+            _parcel(_year(2026), TaxYear(tax_year=2025)),
+            _parcel(_year(2026), other_charges=[TaxCharge(label="special assessment")]),
+            _parcel(
+                _year(2026, installments=[TaxInstallment(balance=Decimal(0)), TaxInstallment()])
+            ),
+        ):
+            with self.subTest(parcel=parcel):
+                self.assertIs(tax_status(parcel, TODAY), TaxStatus.UNKNOWN)
+                self.assertIsNone(total_balance(parcel))
+                result = tax_source_result(
+                    descriptor=DESCRIPTOR,
+                    jurisdiction=SAMPLE,
+                    query=PropertyTaxQuery(parcel_id=parcel.parcel_id),
+                    parcel=parcel,
+                    today=TODAY,
+                )
+                self.assertIs(result.status, SourceResultStatus.PARTIAL)
+                self.assertFalse(result.records[0]["balances_complete"])
+                self.assertTrue(any("unknown" in note for note in result.warnings))
+
+    def test_known_debt_is_preserved_but_incomplete_total_is_unknown(self):
+        parcel = _parcel(_year(2026, balance="500"), TaxYear(tax_year=2025))
+        self.assertIs(tax_status(parcel, TODAY), TaxStatus.DUE)
+        self.assertIsNone(total_balance(parcel))
 
 
 if __name__ == "__main__":

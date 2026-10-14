@@ -31,12 +31,13 @@ from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 from title_mcp.domain.recorder import (
     InstrumentKind,
     InstrumentReference,
     RecordedInstrument,
     classify_instrument,
+    instrument_citation_span,
+    instrument_mention_span,
 )
 
 #: The site rejects a handshake that does not look like a browser.
@@ -177,12 +178,25 @@ class PublicSearchClient:
     ) -> PublicSearchResult:
         meta = payload.get("meta") or {}
         by_hash = (payload.get("data") or {}).get("byHash") or {}
+        raw_count = meta.get("numRecords")
+        if (
+            isinstance(raw_count, bool)
+            or not isinstance(raw_count, (int, str))
+            or not str(raw_count).isascii()
+            or not str(raw_count).isdigit()
+        ):
+            raise PublicSearchProtocolError(
+                "The county did not provide a valid total result count."
+            )
+        record_count = int(raw_count)
+        if record_count < len(by_hash):
+            raise PublicSearchProtocolError("The county returned inconsistent result counts.")
         statistics = (meta.get("statistics") or {}).get("docTypes") or []
         return PublicSearchResult(
             documents=[
                 self.to_instrument(row, excerpt_for=excerpt_for) for row in by_hash.values()
             ],
-            record_count=int(meta.get("numRecords") or 0),
+            record_count=record_count,
             document_type_counts={
                 _text(entry.get("label")): int(entry.get("hits") or 0) for entry in statistics
             },
@@ -327,10 +341,11 @@ def _excerpt(text: str, phrase: str | None, width: int = 80) -> str:
     """The image text around a phrase, enough to show why a document matched."""
     if not (text and phrase):
         return ""
-    at = text.upper().find(phrase.upper())
-    if at < 0:
+    span = instrument_citation_span(text, phrase) or instrument_mention_span(text, phrase)
+    if span is None:
         return ""
-    return " ".join(text[max(0, at - width) : at + len(phrase) + width].split())
+    start, end = span
+    return " ".join(text[max(0, start - width) : end + width].split())
 
 
 def _type_code(description: Any) -> str:

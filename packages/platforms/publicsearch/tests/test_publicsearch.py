@@ -6,6 +6,9 @@ import unittest
 from datetime import date
 from unittest import mock
 
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery
+from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_platform_publicsearch import (
     PublicSearchClient,
     PublicSearchProtocolError,
@@ -14,12 +17,8 @@ from titlemcp_platform_publicsearch import (
     PublicSearchResult,
     PublicSearchSiteConfig,
 )
-from titlemcp_platform_publicsearch.client import SESSION_SECONDS
+from titlemcp_platform_publicsearch.client import SESSION_SECONDS, _excerpt
 from titlemcp_platform_publicsearch.index import PublicSearchIndex
-
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery
-from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURES = json.loads((pathlib.Path(__file__).parent / "fixtures" / "documents.json").read_text())
 CONFIG = PublicSearchSiteConfig(
@@ -212,7 +211,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         fulfilled = {
             "type": "FETCH_DOCUMENTS_FULFILLED",
             "correlationId": "SENT",
-            "payload": {},
+            "payload": {"meta": {"numRecords": 0}, "data": {"byHash": {}}},
         }
         now = [0.0]
         client, sessions = self._client([[fulfilled], [fulfilled]], clock=lambda: now[0])
@@ -225,7 +224,11 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_refusal_raises_and_drops_the_session(self) -> None:
         rejected = {"type": "FETCH_DOCUMENTS_REJECTED", "correlationId": "SENT", "payload": "no"}
-        fulfilled = {"type": "FETCH_DOCUMENTS_FULFILLED", "correlationId": "SENT", "payload": {}}
+        fulfilled = {
+            "type": "FETCH_DOCUMENTS_FULFILLED",
+            "correlationId": "SENT",
+            "payload": {"meta": {"numRecords": 0}, "data": {"byHash": {}}},
+        }
         client, sessions = self._client([[rejected], [fulfilled]])
 
         with self.assertRaises(PublicSearchProtocolError):
@@ -235,7 +238,11 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sessions), 2)
 
     async def test_searches_are_spaced_out(self) -> None:
-        fulfilled = {"type": "FETCH_DOCUMENTS_FULFILLED", "correlationId": "SENT", "payload": {}}
+        fulfilled = {
+            "type": "FETCH_DOCUMENTS_FULFILLED",
+            "correlationId": "SENT",
+            "payload": {"meta": {"numRecords": 0}, "data": {"byHash": {}}},
+        }
         client, _ = self._client([[fulfilled], [fulfilled]])
         client.min_interval_seconds = 0.5
 
@@ -333,6 +340,43 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(match["basis"], "index_reference")
         self.assertEqual(match["release"]["instrument_number"], "202605180303")
         self.assertEqual(match["release"]["recorded_on"], "2026-05-18")
+
+
+class CompletenessTests(unittest.IsolatedAsyncioTestCase):
+    def test_ambiguous_longer_instrument_ocr_is_retained_for_review(self):
+        text = "Recorded as Instrument No. 1234 - 5"
+        self.assertEqual(_excerpt(text, "1234"), text)
+
+    async def test_truncated_empty_search_is_partial_in_both_connector_paths(self):
+        client = mock.Mock()
+        client.search = mock.AsyncMock(return_value=PublicSearchResult(record_count=80))
+        connector = PublicSearchRecorderConnector(CONFIG, client=client)
+        query = SourceQuery(
+            jurisdiction=EXAMPLE,
+            kind=SourceKind.COUNTY_RECORDER,
+            criteria={"instrument_number": "20200101"},
+        )
+        direct = await connector.query(query)
+        release = await connector.find_release(
+            EXAMPLE, MortgageReleaseQuery(mortgage_instrument_number="20200101")
+        )
+        self.assertIs(direct.status, SourceResultStatus.PARTIAL)
+        self.assertIs(release.status, SourceResultStatus.PARTIAL)
+        self.assertEqual(release.records[0]["status"], "incomplete")
+
+    async def test_unsupported_book_page_is_not_reported_as_missing_mortgage(self):
+        result = await PublicSearchRecorderConnector(CONFIG, client=FakeClient()).find_release(
+            EXAMPLE, MortgageReleaseQuery(mortgage_book="100", mortgage_page="20")
+        )
+        self.assertIs(result.status, SourceResultStatus.PARTIAL)
+        self.assertEqual(result.records[0]["status"], "incomplete")
+
+    def test_missing_negative_or_inconsistent_total_cannot_become_empty_success(self):
+        for value in (None, -1, True, "unknown", 0):
+            payload = json.loads(json.dumps(FIXTURES["mortgage_lookup"]))
+            payload["meta"]["numRecords"] = value
+            with self.subTest(value=value), self.assertRaises(PublicSearchProtocolError):
+                _client().to_result(payload)
 
 
 if __name__ == "__main__":

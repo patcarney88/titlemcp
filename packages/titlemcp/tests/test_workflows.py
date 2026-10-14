@@ -12,6 +12,7 @@ from title_mcp.domain.models import (
     WorkflowRequest,
     WorkflowStatus,
 )
+from title_mcp.security import AuthenticatedPrincipal, PrincipalKind, ReviewPermission
 from title_mcp.state.memory import InMemoryWorkflowRepository
 from title_mcp.workflows.engine import WorkflowEngine
 
@@ -61,13 +62,19 @@ class WorkflowEngineTests(unittest.IsolatedAsyncioTestCase):
             record.id,
             decision=ReviewDecision.APPROVE,
             reviewer="Closer",
+            principal=AuthenticatedPrincipal(
+                subject="Closer",
+                kind=PrincipalKind.HUMAN,
+                permissions={ReviewPermission.REVIEW_WORKFLOW},
+            ),
             notes="Looks good.",
         )
         completed = await self.engine.run_once(record.id)
 
         assert completed is not None
         self.assertEqual(completed.status, WorkflowStatus.WAITING_ON_EXTERNAL)
-        self.assertTrue(all(task.status.value == "succeeded" for task in completed.tasks))
+        self.assertTrue(all(task.status.value == "waiting_on_external" for task in completed.tasks))
+        self.assertTrue(all(task.completed_at is None for task in completed.tasks))
 
     async def test_public_records_uses_city_specific_adapter(self) -> None:
         record = await self.engine.create(

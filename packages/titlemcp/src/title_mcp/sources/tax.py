@@ -18,6 +18,7 @@ from title_mcp.domain.tax import (
     TaxParcel,
     TaxSource,
     TaxStatus,
+    balances_complete,
     tax_status,
     total_balance,
 )
@@ -101,12 +102,17 @@ def tax_source_result(
         years=parcel.years,
         other_charges=parcel.other_charges,
         total_balance=total_balance(parcel),
+        balances_complete=balances_complete(parcel),
         notes=notes,
         source_specific=parcel.raw,
     )
     return SourceResult(
         source_id=descriptor.source_id,
-        status=SourceResultStatus.SUCCEEDED,
+        status=(
+            SourceResultStatus.SUCCEEDED
+            if balances_complete(parcel)
+            else SourceResultStatus.PARTIAL
+        ),
         records=[record.model_dump(mode="json")],
         citations=[
             SourceCitation(
@@ -132,6 +138,11 @@ def _notes(status: TaxStatus, parcel: TaxParcel, today: date) -> list[str]:
             f"The collector's data is as of {parcel.data_as_of.isoformat()}, "
             f"{(today - parcel.data_as_of).days} days ago; a payment since then isn't shown."
         )
+    if not balances_complete(parcel):
+        notes.append(
+            "Some displayed balances are unknown. The total balance and paid status "
+            "cannot be established; confirm the full balance with the collector."
+        )
     if status is TaxStatus.PAST_DUE:
         notes.append(
             "An amount is owed past its due date or on an earlier year. Get the payoff, with "
@@ -140,5 +151,5 @@ def _notes(status: TaxStatus, parcel: TaxParcel, today: date) -> list[str]:
     elif status is TaxStatus.DUE:
         notes.append("Tax is owed but not yet past due.")
     elif status is TaxStatus.UNKNOWN:
-        notes.append("The collector's record shows no balances, so paid or owed can't be told.")
+        notes.append("The displayed balances do not establish whether the parcel is paid.")
     return notes

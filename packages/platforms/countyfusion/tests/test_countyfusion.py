@@ -4,7 +4,11 @@ import json
 import pathlib
 import unittest
 from datetime import date
+from unittest import mock
 
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery, RecordedInstrument
+from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_platform_countyfusion import (
     CountyFusionClient,
     CountyFusionProtocolError,
@@ -12,10 +16,6 @@ from titlemcp_platform_countyfusion import (
     CountyFusionSiteConfig,
 )
 from titlemcp_platform_countyfusion.index import CountyFusionIndex, surname_first
-
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery
-from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 CONFIG = CountyFusionSiteConfig(
@@ -286,6 +286,56 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(match["basis"], "index_reference")
         self.assertEqual(match["release"]["instrument_number"], "202605180303")
         self.assertEqual(match["release"]["recorded_on"], "2026-05-18")
+
+
+class CompletenessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unlinked_mortgage_requires_unsupported_ocr_and_is_incomplete(self):
+        client = mock.Mock()
+        client.search_instrument = mock.AsyncMock(
+            return_value=[
+                RecordedInstrument(
+                    instrument_number="201904150101",
+                    kind=InstrumentKind.MORTGAGE,
+                )
+            ]
+        )
+        connector = CountyFusionRecorderConnector(CONFIG, client=client)
+        result = await connector.find_release(
+            EXAMPLE, MortgageReleaseQuery(mortgage_instrument_number="201904150101")
+        )
+        self.assertIs(result.status, SourceResultStatus.PARTIAL)
+        self.assertEqual(result.records[0]["status"], "incomplete")
+        self.assertIn("OCR citation search", " ".join(result.warnings))
+
+    async def test_instrument_page_limit_and_missing_navigation_are_partial(self):
+        for navigation in ("Displaying+1-2+of+3+Items", "unknown"):
+
+            class PartialSite(_FakeSite):
+                def request(self, method, url, _navigation=navigation, **kwargs):
+                    response = super().request(method, url, **kwargs)
+                    if "/search/searchResults.do" in url:
+                        response.headers["Location"] = response.headers.get("Location", "").replace(
+                            "Displaying+1-2+of+2+Items", _navigation
+                        )
+                    return response
+
+            site = PartialSite()
+            connector = CountyFusionRecorderConnector(CONFIG, client=_client(site))
+            with self.subTest(navigation=navigation):
+                result = await connector.query(
+                    SourceQuery(
+                        jurisdiction=EXAMPLE,
+                        kind=SourceKind.COUNTY_RECORDER,
+                        criteria={"instrument_number": "201904150101"},
+                    )
+                )
+                self.assertIs(result.status, SourceResultStatus.PARTIAL)
+                self.assertTrue(result.warnings)
+                result = await connector.find_release(
+                    EXAMPLE, MortgageReleaseQuery(mortgage_instrument_number="201904150101")
+                )
+                self.assertIs(result.status, SourceResultStatus.PARTIAL)
+                self.assertEqual(result.records[0]["status"], "incomplete")
 
 
 if __name__ == "__main__":

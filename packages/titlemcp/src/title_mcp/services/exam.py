@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import date
 from decimal import Decimal
@@ -301,6 +303,18 @@ class ReconciliationChecks(BaseModel):
     index_cross_reference: bool = True
 
 
+def package_digest(package: ExamPackage) -> str:
+    """Bind a reconciliation to the exact canonical content it examined."""
+    canonical = json.dumps(
+        package.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class ReconciliationResult(BaseModel):
     """Canonical record for the internal-consistency check on an exam package."""
 
@@ -310,6 +324,7 @@ class ReconciliationResult(BaseModel):
     schema_version: str = "1.0"
     record_type: str = "exam_reconciliation"
     file_number: str
+    package_sha256: str | None = None
     status: ReconciliationStatus
     discrepancies: list[Discrepancy] = Field(default_factory=list)
     checks_run: list[str] = Field(default_factory=list)
@@ -371,6 +386,7 @@ class ExamReconciliationService:
         blocking = [d for d in discrepancies if d.severity == DiscrepancySeverity.BLOCKING]
         return ReconciliationResult(
             file_number=package.file_number,
+            package_sha256=package_digest(package),
             status=ReconciliationStatus.RED if blocking else ReconciliationStatus.GREEN,
             discrepancies=discrepancies,
             checks_run=checks,

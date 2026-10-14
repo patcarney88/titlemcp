@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -44,6 +44,7 @@ class TaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
+    WAITING_ON_EXTERNAL = "waiting_on_external"
     FAILED = "failed"
     SKIPPED = "skipped"
 
@@ -237,6 +238,25 @@ class WorkflowTask(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
+    @model_validator(mode="after")
+    def normalize_legacy_placeholder(self) -> WorkflowTask:
+        if (
+            self.status is TaskStatus.SUCCEEDED
+            and (self.result or {}).get("execution_mode") == "review_first_placeholder"
+        ):
+            self.result = {
+                **self.result,
+                "legacy_execution_mode": "review_first_placeholder",
+                "execution_mode": "planned",
+                "legacy_started_at": self.started_at.isoformat() if self.started_at else None,
+                "legacy_completed_at": self.completed_at.isoformat() if self.completed_at else None,
+                "message": "Legacy placeholder was not execution. External work is pending.",
+            }
+            self.status = TaskStatus.WAITING_ON_EXTERNAL
+            self.started_at = None
+            self.completed_at = None
+        return self
+
 
 class HumanReviewRequest(BaseModel):
     id: str = Field(default_factory=lambda: new_id("review"))
@@ -244,6 +264,7 @@ class HumanReviewRequest(BaseModel):
     risk_level: RiskLevel = RiskLevel.MEDIUM
     prompt: str
     reviewer: str | None = None
+    authenticated_reviewer: str | None = None
     decision_notes: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     resolved_at: datetime | None = None

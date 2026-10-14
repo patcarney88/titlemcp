@@ -97,6 +97,9 @@ class PacerBankruptcySearchRecord(BaseModel):
     query: dict[str, Any]
     search_criteria: dict[str, Any]
     result_count: int
+    complete: bool = False
+    total_result_count: int | None = None
+    pages_fetched: int = 1
     cases: list[PacerBankruptcyCaseRecord] = Field(default_factory=list)
     summary: PacerBankruptcySearchSummary
     duration_seconds: float
@@ -176,7 +179,9 @@ class PacerClient:
         cases = [
             _case_record_from_party(party) for party in result_without_receipt.get("content") or []
         ]
-        summary = bankruptcy_search_summary(cases)
+        page = result_without_receipt.get("pageInfo")
+        complete, total = _search_completeness(page, len(cases))
+        summary = bankruptcy_search_summary(cases, complete=complete)
         retrieved_at = datetime.now(UTC).isoformat(timespec="seconds")
         LOGGER.info("PACER bankruptcy search returned %s case record(s).", len(cases))
         return PacerBankruptcySearchRecord(
@@ -190,13 +195,15 @@ class PacerClient:
             query=redacted_query(query),
             search_criteria=redacted_criteria(criteria),
             result_count=len(cases),
+            complete=complete,
+            total_result_count=total,
             cases=cases,
             summary=summary,
             duration_seconds=round(time.time() - start, 3),
             source_specific={
                 "pacer": {
                     "content": result_without_receipt.get("content") or [],
-                    "page": result_without_receipt.get("page"),
+                    "pageInfo": page,
                     "receipt_removed": "receipt" in result,
                 }
             },
@@ -327,7 +334,9 @@ class PacerBankruptcySourceConnector(SourceConnector):
         return SourceResult(
             source_id=self.source_id,
             status=(
-                SourceResultStatus.SUCCEEDED
+                SourceResultStatus.PARTIAL
+                if not record.complete
+                else SourceResultStatus.SUCCEEDED
                 if record.result_count
                 else SourceResultStatus.NO_RESULTS
             ),
@@ -339,9 +348,20 @@ class PacerBankruptcySourceConnector(SourceConnector):
                     retrieved_at=record.source.get("retrieved_at"),
                 )
             ],
-            warnings=[],
+            warnings=(
+                []
+                if record.complete
+                else [
+                    "Only one PACER results page was read. Other cases may remain; "
+                    "narrow the search before relying on the result. No extra paid pages "
+                    "were fetched automatically."
+                ]
+            ),
             requires_human_review=True,
             metadata={
+                "complete": record.complete,
+                "total_result_count": record.total_result_count,
+                "pages_fetched": record.pages_fetched,
                 "canonical_schema": record.schema_name,
                 "canonical_schema_version": record.schema_version,
                 "result_count": record.result_count,
@@ -421,28 +441,43 @@ def build_bankruptcy_party_search_criteria(
     return criteria
 
 
+def _search_completeness(page: Any, count: int) -> tuple[bool, int | None]:
+    """A one-page search is complete only when PACER's pageInfo proves it."""
+    if not isinstance(page, dict):
+        return False, None
+    number, pages, total, elements = (
+        page.get("number"),
+        page.get("totalPages"),
+        page.get("totalElements"),
+        page.get("numberOfElements"),
+    )
+    if any(type(value) is not int or value < 0 for value in (number, pages, total, elements)):
+        return False, None
+    complete = (
+        number == 0
+        and pages in (0, 1)
+        and total == count == elements
+        and page.get("first") is True
+        and page.get("last") is True
+    )
+    return complete, total
+
+
 def bankruptcy_search_summary(
     cases: list[PacerBankruptcyCaseRecord],
+    *,
+    complete: bool = False,
 ) -> PacerBankruptcySearchSummary:
-    if not cases:
-        return PacerBankruptcySearchSummary(
-            title_officer_review_required=False,
-            text=(
-                "TITLE OFFICER REVIEW IS NOT REQUIRED\n\nNo bankruptcy cases found for this search."
-            ),
-        )
-
-    review_required = any(case.is_open for case in cases)
-    review_line = (
-        "TITLE OFFICER REVIEW IS REQUIRED"
-        if review_required
-        else "TITLE OFFICER REVIEW IS NOT REQUIRED"
+    open_count = sum(case.is_open for case in cases)
+    text = (
+        f"Read {len(cases)} bankruptcy case record(s): {open_count} open and "
+        f"{len(cases) - open_count} terminated. A title officer must review these facts."
     )
-    detail_lines = [_case_summary_line(case) for case in cases]
-    return PacerBankruptcySearchSummary(
-        title_officer_review_required=review_required,
-        text=f"{review_line}\n\n" + "\n".join(detail_lines),
-    )
+    if not complete:
+        text += " Search results are incomplete; additional cases may remain unread."
+    if cases:
+        text += "\n\n" + "\n".join(_case_summary_line(case) for case in cases)
+    return PacerBankruptcySearchSummary(title_officer_review_required=True, text=text)
 
 
 def is_valid_ssn_deep(value: str) -> bool:

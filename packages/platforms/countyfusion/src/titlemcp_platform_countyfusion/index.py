@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import date
 
 from title_mcp.domain.recorder import (
+    IncompleteRecorderSearch,
     RecordedInstrument,
     index_search_name,
     normalize_instrument_number,
 )
+
 from titlemcp_platform_countyfusion.client import CountyFusionClient
 
 #: Words that mark a business's name, which is indexed as written.
@@ -67,12 +69,12 @@ class CountyFusionIndex:
         return [document for document in found if document.number == wanted]
 
     async def by_book_page(self, book: str, page: str) -> list[RecordedInstrument]:
-        # The book-and-page search is the county's own form per county; not mapped yet.
-        return []
+        # An unsupported operation is not evidence that a mortgage was absent.
+        raise IncompleteRecorderSearch("This county's book-and-page search is not supported.")
 
     async def citing(self, instrument_number: str) -> list[RecordedInstrument]:
         # CountyFusion has no search of the text on document images.
-        return []
+        raise IncompleteRecorderSearch("This county's OCR citation search is not supported.")
 
     async def by_party(
         self, name: str, *, recorded_from: date | None = None

@@ -8,6 +8,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
+from pydantic import SecretStr
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -16,7 +18,26 @@ from title_mcp.mcp.tool_catalog import register_core_tools
 from title_mcp.mcp.toolsets import register_entry_point_toolsets
 from title_mcp.observability import configure_logging
 from title_mcp.platform import TitleMCPPlatform
+from title_mcp.security import InstanceBearerAuth
 from title_mcp.settings import TitleMCPSettings, get_settings
+
+
+class ProtectedMCPServer(MCPServer):
+    """Apply the instance boundary to HTTP apps, including extension routes."""
+
+    def __init__(self, *args: Any, http_credential: SecretStr | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._http_credential = http_credential
+
+    def _protect(self, app: Starlette) -> Starlette:
+        app.add_middleware(InstanceBearerAuth, credential=self._http_credential)
+        return app
+
+    def streamable_http_app(self, **kwargs: Any) -> Starlette:
+        return self._protect(super().streamable_http_app(**kwargs))
+
+    def sse_app(self, **kwargs: Any) -> Starlette:
+        return self._protect(super().sse_app(**kwargs))
 
 
 def create_mcp_server(
@@ -27,8 +48,9 @@ def create_mcp_server(
     configure_logging(settings.log_level, json_logs=settings.log_json)
     platform = platform or TitleMCPPlatform(settings=settings)
 
-    mcp = MCPServer(
+    mcp = ProtectedMCPServer(
         settings.app_name,
+        http_credential=settings.mcp_access_token,
         instructions=(
             "Tools coordinate title and real estate service workflows. "
             "They are review-first and do not make autonomous legal decisions."
@@ -60,7 +82,7 @@ def register_tool_catalog_route(
     settings: TitleMCPSettings,
     mcp_platform: TitleMCPPlatform,
 ) -> None:
-    """Expose a public HTTP tool catalog for browser and deployment checks."""
+    """Expose the instance-authenticated catalog and minimal public liveness route."""
 
     @mcp.custom_route("/", methods=["GET"], name="tool_catalog", include_in_schema=False)
     async def tool_catalog(request: Request) -> JSONResponse:
@@ -69,7 +91,7 @@ def register_tool_catalog_route(
         resource_templates = await _catalog_resource_templates(mcp)
         prompts = await _catalog_prompts(mcp)
         mcp_endpoint = _mcp_endpoint(mcp)
-        mcp_url = settings.mcp_public_url or _request_mcp_url(request, mcp_endpoint)
+        mcp_url = _catalog_url(settings.mcp_public_url or _request_mcp_url(request, mcp_endpoint))
         catalog: dict[str, Any] = {
             "name": settings.app_name,
             "environment": settings.environment,
@@ -105,13 +127,13 @@ def register_tool_catalog_route(
     async def readyz(_request: Request) -> JSONResponse:
         try:
             await mcp_platform.initialize()
-        except Exception as exc:
+        except Exception:
             return JSONResponse(
                 {
                     "status": "error",
                     "name": settings.app_name,
                     "environment": settings.environment,
-                    "error": str(exc),
+                    "error": "Service initialization failed.",
                 },
                 status_code=503,
             )
@@ -468,15 +490,22 @@ def _inspector_catalog_entry(
     if not settings.inspector_url:
         return None
     transport = settings.mcp_transport
-    backend_url = settings.inspector_backend_url or default_backend_url
+    backend_url = _catalog_url(settings.inspector_backend_url or default_backend_url)
     params = {"transport": transport}
     if transport in {"sse", "streamable-http"}:
         params["serverUrl"] = backend_url
     return {
         "transport": transport,
         "backend_url": backend_url,
-        "url": _url_with_query(settings.inspector_url, params),
+        "url": _url_with_query(_catalog_url(settings.inspector_url), params),
     }
+
+
+def _catalog_url(url: str) -> str:
+    """Catalog links never disclose configured URL credentials or query values."""
+    parts = urlsplit(url)
+    authority = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, authority, parts.path or "/", "", ""))
 
 
 def _url_with_query(url: str, params: dict[str, str]) -> str:

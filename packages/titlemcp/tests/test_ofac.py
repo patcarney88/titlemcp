@@ -10,7 +10,7 @@ from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
 from title_mcp.sources.base import SourceKind, SourceQuery, SourceResultStatus
 from title_mcp.sources.ofac.lists import ListStore, changed, parse
-from title_mcp.sources.ofac.match import Screener
+from title_mcp.sources.ofac.match import Screener, Thresholds
 from title_mcp.sources.ofac.models import (
     AliasQuality,
     Outcome,
@@ -580,6 +580,41 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self._query(connector, parties=[])
 
         self.assertEqual(result.status, SourceResultStatus.FAILED)
+
+
+class OfacDisplayLimitTests(unittest.TestCase):
+    def test_lower_scoring_potential_match_survives_ten_weak_exact_aliases(self):
+        rows = [
+            _entry(str(i), f"UNRELATED {i}", "Individual", akas=[("John", "QUANTRELL", "weak")])
+            for i in range(10)
+        ]
+        rows.append(_entry("potential", "QUANTRELL", "Individual", first="John Alexander"))
+        entries, _, _ = parse(_xml(rows), SanctionsList.SDN)
+        result = Screener(entries).screen(ScreeningParty(name="John Quantrell"))
+        self.assertIs(result.outcome, Outcome.POTENTIAL_MATCH)
+        self.assertEqual(result.candidates[0].uid, "potential")
+        self.assertEqual(len(result.candidates), 10)
+        self.assertEqual(result.receipt.candidates_total, 11)
+        self.assertEqual(result.receipt.candidates_omitted, 1)
+
+    def test_one_entry_keeps_its_potential_primary_over_its_weak_exact_alias(self):
+        rows = [
+            _entry(
+                "one",
+                "QUANTRELL",
+                "Individual",
+                first="John Alexander",
+                akas=[("John", "QUANTRELL", "weak")],
+            )
+        ]
+        entries, _, _ = parse(_xml(rows), SanctionsList.SDN)
+        result = Screener(entries).screen(ScreeningParty(name="John Quantrell"))
+        self.assertIs(result.outcome, Outcome.POTENTIAL_MATCH)
+        self.assertIs(result.candidates[0].matched_name_quality, AliasQuality.PRIMARY)
+
+    def test_zero_display_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Screener([], Thresholds(max_candidates=0))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import (
     BorrowerMortgage,
+    IncompleteRecorderSearch,
     InstrumentKind,
     MortgageIdentifiedBy,
     MortgageReleaseQuery,
@@ -45,6 +46,7 @@ from title_mcp.domain.recorder import (
     ReleaseFindingStatus,
     ReleaseMatch,
     ReleaseMatchBasis,
+    instrument_citation_span,
     normalize_instrument_number,
     same_party,
 )
@@ -66,8 +68,8 @@ MAX_BORROWER_MORTGAGES = 6
 class RecorderIndex(Protocol):
     """The lookups a county recorder platform can answer.
 
-    A platform that cannot do one returns an empty list rather than raising, and
-    the method falls through to the next kind of evidence.
+    An unsupported or truncated search raises IncompleteRecorderSearch. An
+    empty list means the platform completed the search and found nothing.
     """
 
     async def by_instrument(self, instrument_number: str) -> list[RecordedInstrument]:
@@ -130,22 +132,32 @@ class ReleaseFinding(BaseModel):
 async def find_mortgage_release(
     index: RecorderIndex, query: MortgageReleaseQuery
 ) -> ReleaseFinding:
-    """Whether the county's index shows a release of the queried mortgage."""
+    """Whether the county's index shows a release, with completeness enforced."""
+    try:
+        return await _find_mortgage_release(index, query)
+    except IncompleteRecorderSearch as exc:
+        return ReleaseFinding(status=ReleaseFindingStatus.INCOMPLETE, notes=[str(exc)])
+
+
+async def _find_mortgage_release(
+    index: RecorderIndex, query: MortgageReleaseQuery
+) -> ReleaseFinding:
     notes: list[str] = []
     mortgage, identified_by = await _find_mortgage(index, query, notes)
 
     releases: list[ReleaseMatch] = []
+    candidates: list[ReleaseMatch] = []
     if mortgage is not None:
         releases = await _referenced_releases(index, mortgage)
     number = mortgage.instrument_number if mortgage else query.mortgage_instrument_number
     if not releases and number:
         # The mortgage may not be indexed yet, or its index entry may carry no
         # links. A release can still cite it.
-        releases = await _citing_releases(index, number)
+        releases = await _citing_releases(index, number, candidates=candidates)
 
     borrower_mortgages: list[BorrowerMortgage] = []
     if mortgage is None and not releases and query.borrower_names:
-        borrower_mortgages = await _borrower_mortgages(index, query, notes)
+        borrower_mortgages = await _borrower_mortgages(index, query, notes, candidates=candidates)
         chosen, why = _the_paid_off_mortgage(borrower_mortgages, query)
         if chosen is not None:
             mortgage, identified_by = chosen.mortgage, MortgageIdentifiedBy.PARTIES
@@ -155,16 +167,17 @@ async def find_mortgage_release(
                 f"mortgages as {why}, not by its number. Confirm it against the commitment."
             )
 
-    candidates: list[ReleaseMatch] = []
     if borrower_mortgages and mortgage is None:
         # Several were open and more than one has been released since: the
         # payoff is likely among them, but which one can't be told.
-        candidates = [
-            match
-            for entry in borrower_mortgages
-            if entry.open_at_payoff and entry.released
-            for match in entry.releases
-        ]
+        candidates.extend(
+            [
+                match
+                for entry in borrower_mortgages
+                if entry.open_at_payoff and entry.released
+                for match in entry.releases
+            ]
+        )
     if not releases and not candidates and query.borrower_names:
         # Once the borrower's mortgages have been read, only a release the index
         # ties to nothing is left to be the one: in a county that doesn't link
@@ -234,7 +247,9 @@ def release_source_result(
         for document in cited.values()
     ]
     status = (
-        SourceResultStatus.NO_RESULTS
+        SourceResultStatus.PARTIAL
+        if finding.status is ReleaseFindingStatus.INCOMPLETE
+        else SourceResultStatus.NO_RESULTS
         if finding.status is ReleaseFindingStatus.MORTGAGE_NOT_FOUND
         else SourceResultStatus.SUCCEEDED
     )
@@ -291,7 +306,11 @@ async def _find_mortgage(
 
 
 async def _borrower_mortgages(
-    index: RecorderIndex, query: MortgageReleaseQuery, notes: list[str]
+    index: RecorderIndex,
+    query: MortgageReleaseQuery,
+    notes: list[str],
+    *,
+    candidates: list[ReleaseMatch],
 ) -> list[BorrowerMortgage]:
     paid_off = query.paid_off_on
     if paid_off is None:
@@ -325,13 +344,18 @@ async def _borrower_mortgages(
     checked = recent[:MAX_BORROWER_MORTGAGES] + [
         m for m in recent[MAX_BORROWER_MORTGAGES:] if m.number in released_since
     ]
+    if len(checked) < len(recent):
+        raise IncompleteRecorderSearch(
+            "The borrower mortgage search exceeds its evidence limit. "
+            "Supply the mortgage's instrument number before judging its release."
+        )
     owed: list[BorrowerMortgage] = []
     for mortgage in checked:
         mortgage = await index.with_links(mortgage)
         # Where the county doesn't link a release to its mortgage, the release's
         # text usually cites the mortgage's number.
         linked = await _referenced_releases(index, mortgage) or await _citing_releases(
-            index, mortgage.instrument_number
+            index, mortgage.instrument_number, candidates=candidates
         )
         released_before = [
             match
@@ -349,11 +373,6 @@ async def _borrower_mortgages(
         )
     if not found:
         notes.append("No mortgage given by the borrower before the payoff is in the index.")
-    elif len(found) > len(checked):
-        notes.append(
-            f"The borrower's name matches {len(found)} mortgages before the payoff; the "
-            f"{len(checked)} most likely were checked. A common name matches other people's."
-        )
     return owed
 
 
@@ -435,7 +454,9 @@ async def _referenced_releases(
     return matches
 
 
-async def _citing_releases(index: RecorderIndex, instrument_number: str) -> list[ReleaseMatch]:
+async def _citing_releases(
+    index: RecorderIndex, instrument_number: str, *, candidates: list[ReleaseMatch]
+) -> list[ReleaseMatch]:
     wanted = normalize_instrument_number(instrument_number)
     matches: list[ReleaseMatch] = []
     for document in await index.citing(instrument_number):
@@ -447,12 +468,24 @@ async def _citing_releases(index: RecorderIndex, instrument_number: str) -> list
                 f"{document.document_type or 'Release'} {document.instrument_number} is linked "
                 f"in the county's index to mortgage {instrument_number}."
             )
-        else:
+        elif instrument_citation_span(document.text_excerpt, instrument_number) is not None:
             basis = ReleaseMatchBasis.TEXT_REFERENCE
             explanation = (
                 f"The text of {document.document_type or 'release'} {document.instrument_number} "
                 f"cites instrument {instrument_number}."
             )
+        else:
+            candidates.append(
+                ReleaseMatch(
+                    release=document,
+                    basis=ReleaseMatchBasis.UNVERIFIED_TEXT,
+                    explanation=(
+                        f"OCR search returned this document for {instrument_number}, but a whole "
+                        "instrument citation could not be verified. Review the image and excerpt."
+                    ),
+                )
+            )
+            continue
         matches.append(ReleaseMatch(release=document, basis=basis, explanation=explanation))
     return matches
 

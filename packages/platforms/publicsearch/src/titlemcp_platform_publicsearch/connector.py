@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from websockets.exceptions import WebSocketException
-
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import MortgageReleaseQuery
 from title_mcp.sources import (
@@ -19,6 +17,8 @@ from title_mcp.sources import (
     find_mortgage_release,
     release_source_result,
 )
+from websockets.exceptions import WebSocketException
+
 from titlemcp_platform_publicsearch.client import (
     PublicSearchClient,
     PublicSearchProtocolError,
@@ -88,7 +88,7 @@ class PublicSearchRecorderConnector:
             )
         except _SEARCH_FAILURES as exc:
             return self._failed(exc)
-        if not found.documents:
+        if not found.documents and found.record_count == 0:
             return SourceResult(source_id=self.source_id, status=SourceResultStatus.NO_RESULTS)
 
         retrieved_at = datetime.now(UTC).isoformat()
@@ -100,7 +100,7 @@ class PublicSearchRecorderConnector:
             )
         return SourceResult(
             source_id=self.source_id,
-            status=SourceResultStatus.SUCCEEDED,
+            status=SourceResultStatus.PARTIAL if warnings else SourceResultStatus.SUCCEEDED,
             records=[document.model_dump(mode="json") for document in found.documents],
             citations=[
                 SourceCitation(

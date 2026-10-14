@@ -4,6 +4,7 @@ import unittest
 import urllib.error
 import urllib.request
 from email.message import Message
+from unittest import mock
 
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
@@ -18,6 +19,7 @@ from title_mcp.sources.hoa_serpapi import (
     build_hoa_site_contact_search_params,
     hoa_contact_record_from_serpapi,
 )
+from title_mcp.sources.public_http import PublicPageResponse
 
 
 class HoaSerpApiTests(unittest.IsolatedAsyncioTestCase):
@@ -262,13 +264,13 @@ class HoaSerpApiTests(unittest.IsolatedAsyncioTestCase):
             "<p>Call (614) 555-0100.</p></body></html>"
         )
         url = "https://example.org/contact"
-        opener = _FakeUrlOpener({url: html.encode("utf-8")})
-        original = urllib.request._opener  # type: ignore[attr-defined]
-        urllib.request.install_opener(opener)
-        try:
+        with mock.patch(
+            "title_mcp.sources.hoa_serpapi.fetch_public_page",
+            return_value=PublicPageResponse(
+                url=url, status=200, content_type="text/html; charset=utf-8", body=html.encode()
+            ),
+        ):
             fetched = _fetch_page_text(url, timeout=5.0)
-        finally:
-            urllib.request.install_opener(original)
 
         self.assertIsNone(fetched.error)
         self.assertEqual(fetched.status_code, 200)
@@ -282,16 +284,10 @@ class HoaSerpApiTests(unittest.IsolatedAsyncioTestCase):
     def test_fetch_page_text_returns_error_on_failure(self) -> None:
         url = "https://example.invalid/never-resolves"
 
-        def _boom(request, timeout):  # pragma: no cover - tiny inline opener
-            raise urllib.error.URLError("no DNS")
-
-        opener = _FakeUrlOpener({}, open_override=_boom)
-        original = urllib.request._opener  # type: ignore[attr-defined]
-        urllib.request.install_opener(opener)
-        try:
+        with mock.patch(
+            "title_mcp.sources.hoa_serpapi.fetch_public_page", side_effect=OSError("no DNS")
+        ):
             fetched = _fetch_page_text(url, timeout=1.0)
-        finally:
-            urllib.request.install_opener(original)
 
         self.assertIsNotNone(fetched.error)
         self.assertIsNone(fetched.status_code)

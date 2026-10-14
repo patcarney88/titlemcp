@@ -5,7 +5,6 @@ import unittest
 from datetime import date
 
 from pydantic import ValidationError
-
 from title_mcp.adapters.base import JurisdictionScope
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import (
@@ -18,6 +17,7 @@ from title_mcp.domain.recorder import (
     ReleaseMatchBasis,
     classify_instrument,
     index_search_name,
+    instrument_citation_span,
     same_party,
 )
 from title_mcp.mcp.server import create_mcp_server
@@ -618,9 +618,9 @@ class BorrowerMortgageTests(unittest.IsolatedAsyncioTestCase):
 
         finding = await find_mortgage_release(index, self._query())
 
-        self.assertIs(finding.status, ReleaseFindingStatus.RELEASED)
-        self.assertEqual(finding.mortgage.instrument_number, "201001010101")
-        self.assertIn("A common name matches other people's", " ".join(finding.notes))
+        self.assertIs(finding.status, ReleaseFindingStatus.INCOMPLETE)
+        self.assertIsNone(finding.mortgage)
+        self.assertIn("evidence limit", " ".join(finding.notes))
 
     async def test_the_lender_picks_between_open_mortgages(self) -> None:
         index = _FakeIndex(
@@ -789,6 +789,55 @@ class MortgageReleaseToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "requires_configuration")
         self.assertIn("street address", result["warnings"][0])
+
+
+class CitationBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def test_ocr_separator_continuations_never_match_an_identifier_prefix(self):
+        for separator in (".", "/", "-"):
+            for before in ("", " "):
+                for after in ("", " "):
+                    text = f"Instrument No. 1234{before}{separator}{after}5"
+                    with self.subTest(text=text):
+                        self.assertIsNone(instrument_citation_span(text, "1234"))
+        for text in (
+            "Instrument No. 1234",
+            "Mortgage recorded as 1 2 3 4",
+            "Document number 12-34 is satisfied",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNotNone(instrument_citation_span(text, "1234"))
+
+    async def test_longer_identifier_or_unrelated_number_cannot_confirm_release(self):
+        for text in (
+            f"Instrument {MORTGAGE}9 is satisfied.",
+            f"Instrument {MORTGAGE}-1 is satisfied.",
+            f"Instrument {MORTGAGE} - 5 is satisfied.",
+            f"Instrument {MORTGAGE}- 5 is satisfied.",
+            f"Instrument {MORTGAGE}. 5 is satisfied.",
+            f"Instrument {MORTGAGE} / 5 is satisfied.",
+            f"Instrument X{MORTGAGE} is satisfied.",
+            f"Account balance {MORTGAGE} paid.",
+            f"Phone: {MORTGAGE}",
+        ):
+            with self.subTest(text=text):
+                finding = await find_mortgage_release(
+                    _FakeIndex([_mortgage(), _release(text=text)]),
+                    MortgageReleaseQuery(mortgage_instrument_number=MORTGAGE),
+                )
+                self.assertIs(finding.status, ReleaseFindingStatus.CANDIDATES_ONLY)
+                self.assertFalse(finding.releases)
+                self.assertIs(finding.candidates[0].basis, ReleaseMatchBasis.UNVERIFIED_TEXT)
+                self.assertEqual(finding.candidates[0].release.text_excerpt, text)
+
+    async def test_explicit_whole_identifier_citation_is_preserved(self):
+        finding = await find_mortgage_release(
+            _FakeIndex(
+                [_mortgage(), _release(text=f"Mortgage instrument no. {MORTGAGE} is satisfied.")]
+            ),
+            MortgageReleaseQuery(mortgage_instrument_number=MORTGAGE),
+        )
+        self.assertIs(finding.status, ReleaseFindingStatus.RELEASED)
+        self.assertIs(finding.releases[0].basis, ReleaseMatchBasis.TEXT_REFERENCE)
 
 
 if __name__ == "__main__":

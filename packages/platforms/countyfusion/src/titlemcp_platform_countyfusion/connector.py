@@ -6,9 +6,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from requests import RequestException
-
 from title_mcp.domain.models import Jurisdiction
-from title_mcp.domain.recorder import MortgageReleaseQuery
+from title_mcp.domain.recorder import IncompleteRecorderSearch, MortgageReleaseQuery
 from title_mcp.sources import (
     SourceCitation,
     SourceDescriptor,
@@ -19,6 +18,7 @@ from title_mcp.sources import (
     find_mortgage_release,
     release_source_result,
 )
+
 from titlemcp_platform_countyfusion.client import (
     CountyFusionClient,
     CountyFusionProtocolError,
@@ -80,6 +80,13 @@ class CountyFusionRecorderConnector:
                     recorded_from=_date(criteria.get("recorded_from")),
                     recorded_to=_date(criteria.get("recorded_to")),
                 )
+        except IncompleteRecorderSearch as exc:
+            return SourceResult(
+                source_id=self.source_id,
+                status=SourceResultStatus.PARTIAL,
+                warnings=[str(exc)],
+                requires_human_review=True,
+            )
         except _SEARCH_FAILURES as exc:
             return self._failed(exc)
         if not found:

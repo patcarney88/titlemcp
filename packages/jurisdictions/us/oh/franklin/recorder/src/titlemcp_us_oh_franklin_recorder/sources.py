@@ -13,6 +13,7 @@ from title_mcp.sources import (
     SourceResult,
     SourceResultStatus,
 )
+
 from titlemcp_us_oh_franklin_recorder import chain
 from titlemcp_us_oh_franklin_recorder.client import (
     BASE_URL,
@@ -76,11 +77,17 @@ class FranklinRecorderSourceConnector(SourceConnector):
                 warnings=[f"{type(exc).__name__}: {exc}"],
             )
 
-        if not found.documents:
+        if not found.documents and found.record_count == 0:
             return SourceResult(source_id=self.source_id, status=SourceResultStatus.NO_RESULTS)
 
+        complete = found.record_count == len(found.documents)
         records = [document.model_dump(mode="json") for document in found.documents]
         warnings: list[str] = []
+        if not complete:
+            warnings.append(
+                f"The county matched {found.record_count} documents but returned "
+                f"{len(found.documents)}. Narrow the search before relying on a chain."
+            )
         if not parcel_id:
             # Without a parcel the answer is every property this party touched.
             warnings.append(
@@ -89,14 +96,17 @@ class FranklinRecorderSourceConnector(SourceConnector):
             )
         else:
             built = chain.build(
-                parcel_id=parcel_id, owner_name=party_name, documents=found.documents
+                parcel_id=parcel_id,
+                owner_name=party_name,
+                documents=found.documents,
+                complete=complete,
             )
             records = [built.model_dump(mode="json")]
             warnings.extend(built.notes)
 
         return SourceResult(
             source_id=self.source_id,
-            status=SourceResultStatus.SUCCEEDED,
+            status=SourceResultStatus.SUCCEEDED if complete else SourceResultStatus.PARTIAL,
             records=records,
             warnings=warnings,
             # An open lien is a title-impacting fact read out of an index that

@@ -219,6 +219,38 @@ def same_party(left: str, right: str) -> bool:
     return len(shorter) >= 2 and set(shorter) <= set(longer)
 
 
+def instrument_citation_span(text: str, instrument_number: str) -> tuple[int, int] | None:
+    """An exact identifier in explicit instrument-citation context, never a substring."""
+    wanted = normalize_instrument_number(instrument_number)
+    if not wanted:
+        return None
+    digits = r"[\s./-]*".join(re.escape(character) for character in wanted)
+    context = (
+        r"\b(?:instrument|inst\.?|document|doc\.?|mortgage|deed\s+of\s+trust)"
+        r"\s*(?:recorded\s+(?:as|under)\s+)?"
+        r"(?:(?:no\.?|number|num\.?|#)\s*[:#.-]?\s*)?"
+    )
+    pattern = re.compile(
+        context + r"(?<![A-Z0-9])" + digits + r"(?![A-Z0-9]|\s*[./-]\s*[A-Z0-9]|\s+\d)",
+        re.IGNORECASE,
+    )
+    found = pattern.search(text or "")
+    return found.span() if found else None
+
+
+class IncompleteRecorderSearch(RuntimeError):
+    """The index cannot establish a complete search within its supported bounds."""
+
+
+def instrument_mention_span(text: str, instrument_number: str) -> tuple[int, int] | None:
+    """Locate possibly ambiguous OCR evidence without promoting it to a citation."""
+    wanted = normalize_instrument_number(instrument_number)
+    if not wanted:
+        return None
+    found = re.search(r"[\s./-]*".join(map(re.escape, wanted)), text or "", re.IGNORECASE)
+    return found.span() if found else None
+
+
 class InstrumentReference(BaseModel):
     """Another instrument that the county's index links to this one."""
 
@@ -305,6 +337,8 @@ class ReleaseMatchBasis(StrEnum):
     INDEX_REFERENCE = "index_reference"
     #: The release's text cites the mortgage's instrument number.
     TEXT_REFERENCE = "text_reference"
+    #: The text mentions these characters but does not establish a whole citation.
+    UNVERIFIED_TEXT = "unverified_text"
     #: A release between the same lender and borrower, recorded after the payoff.
     PARTY_MATCH = "party_match"
 
@@ -328,6 +362,7 @@ class ReleaseFindingStatus(StrEnum):
     NOT_RELEASED = "not_released"
     #: The mortgage itself could not be found, and no candidate release was.
     MORTGAGE_NOT_FOUND = "mortgage_not_found"
+    INCOMPLETE = "incomplete"
 
 
 class MortgageIdentifiedBy(StrEnum):

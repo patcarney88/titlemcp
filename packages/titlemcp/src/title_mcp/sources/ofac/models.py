@@ -145,6 +145,8 @@ class ScreeningReceipt(BaseModel):
     index_hits: dict[str, int] = Field(default_factory=dict)
     listed_names_compared: int = 0
     listed_names_total: int = 0
+    candidates_total: int = Field(default=0, ge=0)
+    candidates_omitted: int = Field(default=0, ge=0)
     nearest_below_review: list[NearMiss] = Field(default_factory=list)
     summary: str = ""
 

@@ -18,7 +18,7 @@ class InMemoryWorkflowRepository(WorkflowRepository):
 
     async def save(self, record: WorkflowRecord) -> WorkflowRecord:
         async with self._lock:
-            stored = record.model_copy(deep=True)
+            stored = WorkflowRecord.model_validate(record.model_dump())
             self._records[stored.id] = stored
             return stored.model_copy(deep=True)
 
