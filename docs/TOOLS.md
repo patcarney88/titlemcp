@@ -41,7 +41,10 @@ Input:
 }
 ```
 
-Returns a canonical `title_mcp.parcel_record`.
+Returns a canonical `title_mcp.parcel_record` when the search has one candidate.
+Multiple candidates return `partial`, no selected parcel record, and the actual
+`metadata.result_count` plus candidate labels/paths in `metadata.candidates`.
+Narrow the address and review the parcel identity before relying on a result.
 
 Useful fields:
 
@@ -424,8 +427,9 @@ The server exposes read-only MCP resources for richer MCP Inspector debugging:
 - `titlemcp://tools/{tool_name}`: detailed schema and annotations for one tool.
 - `titlemcp://workflows/kinds`: workflow kinds accepted by workflow tools.
 
-The HTTP server also exposes `GET /healthz` and `GET /readyz` for deployment
-checks.
+The HTTP server exposes public `GET /healthz` for liveness. Authenticated
+`GET /readyz` checks current repository availability and the recovery loop;
+failures or probe timeouts return HTTP 503 without internal error details.
 
 ## Inspector Prompts
 

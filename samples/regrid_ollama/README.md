@@ -8,6 +8,8 @@ The default behavior prints the MCP tool result and stops. Pass
 `--summarize-with-ollama` to send the result back to Ollama for a final summary.
 The MCP result is a canonical `title_mcp.parcel_record`; Regrid's original
 response fields remain available under `source_specific.regrid`.
+An ambiguous search returns `partial` with candidate labels/paths and no selected
+parcel. Narrow the address and review the identity before using a parcel record.
 
 ## Prerequisites
 

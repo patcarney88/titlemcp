@@ -115,6 +115,14 @@ class TitleMCPPlatform:
             await self.engine.start_recovery()
             self._initialized = True
 
+    async def check_readiness(self) -> None:
+        if not self._initialized or not self.engine.recovery_running:
+            raise RuntimeError("Workflow recovery is not running.")
+        async with asyncio.timeout(self.settings.readiness_timeout_seconds):
+            await self.repository.check_health(
+                timeout_seconds=self.settings.readiness_timeout_seconds
+            )
+
     async def shutdown(self) -> None:
         async with self._init_lock:
             await self.engine.shutdown()

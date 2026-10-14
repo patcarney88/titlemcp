@@ -76,6 +76,10 @@ class WorkflowEngine:
         self._recovery_task: asyncio.Task[None] | None = None
         self._recovery_cursor: str | None = None
 
+    @property
+    def recovery_running(self) -> bool:
+        return self._recovery_task is not None and not self._recovery_task.done()
+
     async def create(self, request: WorkflowRequest) -> WorkflowRecord:
         with trace_span(
             "workflow.create",

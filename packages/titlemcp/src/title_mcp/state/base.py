@@ -13,6 +13,10 @@ class WorkflowRepository(Protocol):
     async def initialize(self) -> None:
         """Prepare the repository for use."""
 
+    async def check_health(self, *, timeout_seconds: float = 2.0) -> None:
+        """Probe current storage availability without creating or changing state."""
+        raise NotImplementedError("Repository health checks are not implemented.")
+
     async def save(self, record: WorkflowRecord) -> WorkflowRecord:
         """Atomically save only the expected revision, returning its incremented copy.
 

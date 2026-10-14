@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 from typing import Any
 
 from title_mcp.domain.models import WorkflowKind, WorkflowRecord, WorkflowStatus
@@ -46,6 +48,29 @@ class PostgresWorkflowRepository(WorkflowRepository):
                     ON title_mcp_workflows (kind);
                 """
             )
+
+    async def check_health(self, *, timeout_seconds: float = 2.0) -> None:
+        if self._pool is None:
+            raise RuntimeError("Workflow repository is not initialized.")
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        conn = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                conn = await self._pool.acquire(timeout=timeout_seconds)
+                await conn.fetchval(
+                    "SELECT 1 FROM title_mcp_workflows LIMIT 1",
+                    timeout=max(0.001, deadline - asyncio.get_running_loop().time()),
+                )
+                await self._pool.release(
+                    conn, timeout=max(0.001, deadline - asyncio.get_running_loop().time())
+                )
+                conn = None
+        finally:
+            if conn is not None:
+                # Do not await an unbounded context-manager reset after cancellation.
+                # A detached proxy may already be released; preserve the original error.
+                with suppress(Exception):
+                    conn.terminate()
 
     async def save(self, record: WorkflowRecord) -> WorkflowRecord:
         await self._ensure_pool()

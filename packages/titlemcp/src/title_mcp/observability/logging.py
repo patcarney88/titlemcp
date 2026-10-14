@@ -51,11 +51,26 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class HttpTransportLogFilter(logging.Filter):
+    """Requests transports include query strings and raw failures in diagnostics.
+
+    Application connectors provide safe status/timing messages instead. Keep the
+    underlying library records out of the application sink at every log level.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not any(
+            record.name == name or record.name.startswith(name + ".")
+            for name in ("urllib3", "requests")
+        )
+
+
 def configure_logging(level: str = "INFO", *, json_logs: bool = True) -> None:
     root = logging.getLogger()
     root.setLevel(level.upper())
     handler = logging.StreamHandler()
     handler.setLevel(level.upper())
+    handler.addFilter(HttpTransportLogFilter())
     formatter = (
         JsonFormatter() if json_logs else logging.Formatter("%(levelname)s %(name)s: %(message)s")
     )

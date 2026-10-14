@@ -7,7 +7,8 @@ identity. Deployment has not been performed. When a configured server runs, it s
 | --- | --- |
 | `/mcp` | The MCP endpoint that clients connect to. |
 | `/` | A JSON catalog of the tools, resources and prompts, with the endpoint's full URL. |
-| `/healthz` | A health check. |
+| `/healthz` | Public liveness. |
+| `/readyz` | Instance-authenticated storage/recovery readiness; HTTP 503 on failure. |
 
 The upstream hosting manifests remain reference material. They must be adapted
 to supply both required Docker build arguments; they are not one-click setups

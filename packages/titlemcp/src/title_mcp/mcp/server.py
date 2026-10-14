@@ -155,14 +155,14 @@ def register_tool_catalog_route(
     @mcp.custom_route("/readyz", methods=["GET"], name="readyz", include_in_schema=False)
     async def readyz(_request: Request) -> JSONResponse:
         try:
-            await mcp_platform.initialize()
+            await mcp_platform.check_readiness()
         except Exception:
             return JSONResponse(
                 {
                     "status": "error",
                     "name": settings.app_name,
                     "environment": settings.environment,
-                    "error": "Service initialization failed.",
+                    "error": "Service readiness check failed.",
                 },
                 status_code=503,
             )

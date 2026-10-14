@@ -77,6 +77,19 @@ class RegridParcelLookupQuery(BaseModel):
     address: str = Field(min_length=1)
 
 
+class RegridParcelCandidate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, hide_input_in_errors=True)
+
+    label: str | None = None
+    path: str | None = None
+
+
+class RegridAmbiguousParcelError(RegridClientError):
+    def __init__(self, candidates: list[RegridParcelCandidate]) -> None:
+        super().__init__("Parcel search returned multiple candidates. Narrow the address.")
+        self.candidates = candidates
+
+
 class RegridParcelLookupRecord(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -181,12 +194,17 @@ class RegridParcelQueryService:
     def lookup(self, address: str) -> RegridParcelLookupRecord | None:
         start = time.time()
         self._refresh_cookie_if_needed()
-        LOGGER.info("Querying Regrid parcel search for address: %s", address)
+        LOGGER.info("Querying Regrid parcel search.")
 
         try:
             data, search_query_used = self._search(address)
             if not data:
                 return None
+
+            if len(data) > 1:
+                raise RegridAmbiguousParcelError(
+                    [RegridParcelCandidate.model_validate(candidate) for candidate in data]
+                )
 
             first_result = data[0]
             path = first_result.get("path")
@@ -194,7 +212,7 @@ class RegridParcelQueryService:
             if not path:
                 return None
             detail_url = f"https://app.regrid.com{path}.json"
-            LOGGER.info("Loading Regrid parcel detail: %s", detail_url)
+            LOGGER.info("Loading Regrid parcel detail.")
             detail_response = self._perform_request(
                 detail_url,
                 headers=self.json_headers,
@@ -225,18 +243,14 @@ class RegridParcelQueryService:
                 geometry=detail_data["geometry"],
                 raw=merged,
             )
-        except requests.Timeout as exc:
-            raise RegridClientError(
-                f"Timeout occurred while querying Regrid for address {address!r}."
-            ) from exc
-        except requests.ConnectionError as exc:
-            raise RegridClientError(
-                f"Connection error occurred while querying Regrid for address {address!r}."
-            ) from exc
-        except requests.RequestException as exc:
-            raise RegridClientError(
-                f"Error querying Regrid for address {address!r}: {exc}"
-            ) from exc
+        except requests.Timeout:
+            raise RegridClientError("Parcel request timed out.") from None
+        except requests.ConnectionError:
+            raise RegridClientError("Parcel connection failed.") from None
+        except requests.RequestException:
+            raise RegridClientError("Parcel request failed.") from None
+        except (ValueError, TypeError):
+            raise RegridClientError("Parcel response was invalid.") from None
 
     def _search(self, address: str) -> tuple[list[dict[str, Any]], str]:
         last_error: Exception | None = None
@@ -244,10 +258,9 @@ class RegridParcelQueryService:
         for index, search_query in enumerate(variants, start=1):
             params = {"query": search_query, "autocomplete": 1, "strict": "false"}
             LOGGER.info(
-                "Regrid search variant %s/%s: query=%r",
+                "Regrid search variant %s/%s.",
                 index,
                 len(variants),
-                search_query,
             )
             try:
                 response = self._perform_request(
@@ -259,10 +272,9 @@ class RegridParcelQueryService:
             except RegridServiceUnavailableError as exc:
                 last_error = exc
                 LOGGER.warning(
-                    "Regrid search variant %s/%s returned service unavailable: %s",
+                    "Regrid search variant %s/%s returned service unavailable.",
                     index,
                     len(variants),
-                    exc,
                 )
                 continue
             data = response.json()
@@ -276,10 +288,8 @@ class RegridParcelQueryService:
             LOGGER.info("Regrid search variant %s returned no results.", index)
 
         if last_error:
-            raise RegridClientError(
-                f"All Regrid search query variants failed. Last error: {last_error}"
-            ) from last_error
-        LOGGER.debug("No Regrid results found for address %r.", address)
+            raise RegridClientError("All Regrid search query variants failed.") from None
+        LOGGER.debug("No Regrid results found.")
         return [], variants[0]
 
     def _get_session_with_retries(
@@ -323,11 +333,10 @@ class RegridParcelQueryService:
         if not self.proxies:
             raise RegridProxyConfigurationError("No Regrid smart proxies are configured.")
         proxy = random.choice(self.proxies)
-        LOGGER.debug("Using Regrid smart proxy endpoint: %s", proxy)
+        LOGGER.debug("Using Regrid smart proxy endpoint.")
         return proxy
 
     def _fetch_new_cookie(self) -> str:
-        last_error: Exception | None = None
         LOGGER.info(
             "Fetching Regrid session cookie through smart proxy pool (%s attempts max).",
             self.max_proxy_attempts,
@@ -337,11 +346,9 @@ class RegridParcelQueryService:
             self.current_proxy = proxy
             start = time.monotonic()
             LOGGER.info(
-                "Regrid cookie HEAD attempt %s/%s: url=%s proxy=%s timeout=%ss.",
+                "Regrid cookie HEAD attempt %s/%s: timeout=%ss.",
                 attempt,
                 self.max_proxy_attempts,
-                self.url_cookies,
-                _redacted_proxy_map(proxy),
                 self.cookie_timeout_seconds,
             )
             try:
@@ -365,21 +372,19 @@ class RegridParcelQueryService:
                     raise RegridClientError("Failed to retrieve Regrid session cookie.")
                 LOGGER.info("Fetched new Regrid session cookie on attempt %s.", attempt)
                 return session_cookie
-            except (requests.RequestException, RegridClientError) as exc:
-                last_error = exc
+            except (requests.RequestException, RegridClientError):
                 elapsed = time.monotonic() - start
                 LOGGER.warning(
-                    "Regrid session cookie attempt %s/%s failed after %.3fs: %s",
+                    "Regrid session cookie attempt %s/%s failed after %.3fs.",
                     attempt,
                     self.max_proxy_attempts,
                     elapsed,
-                    exc,
                 )
 
         raise RegridClientError(
             "Error fetching Regrid session cookie after "
-            f"{self.max_proxy_attempts} proxy attempt(s): {last_error}"
-        ) from last_error
+            f"{self.max_proxy_attempts} proxy attempt(s)."
+        ) from None
 
     def _refresh_cookie_if_needed(self) -> None:
         with self.lock:
@@ -398,18 +403,14 @@ class RegridParcelQueryService:
         attempts = 0
         rate_limit_attempts = 0
         max_attempts = self.max_proxy_attempts
-        last_error: Exception | None = None
         while attempts < max_attempts and rate_limit_attempts < 2:
             attempt_number = attempts + 1
             start = time.monotonic()
             try:
                 LOGGER.info(
-                    "Regrid GET attempt %s/%s: url=%s params=%s proxy=%s timeout=%ss.",
+                    "Regrid GET attempt %s/%s: timeout=%ss.",
                     attempt_number,
                     max_attempts,
-                    url,
-                    params or {},
-                    _redacted_proxy_map(self.current_proxy),
                     self.request_timeout_seconds,
                 )
                 response = self.session.get(
@@ -428,7 +429,6 @@ class RegridParcelQueryService:
                     elapsed,
                 )
                 if response.status_code == 429:
-                    last_error = RegridClientError("Regrid returned HTTP 429.")
                     LOGGER.warning("Regrid returned 429. Retrying with a new cookie and proxy.")
                     self.cookies["_session_id"] = self._fetch_new_cookie()
                     self.current_proxy = self._get_next_proxy()
@@ -438,57 +438,44 @@ class RegridParcelQueryService:
                 if response.status_code == 503 and _is_regrid_service_unavailable_response(
                     response
                 ):
-                    body_preview = _response_text_preview(response)
                     raise RegridServiceUnavailableError(
-                        "Regrid returned HTTP 503 Service Unavailable. "
-                        f"Body preview={body_preview!r}"
+                        "Regrid returned HTTP 503 Service Unavailable."
                     )
                 if response.status_code in {500, 502, 503, 504}:
                     attempts += 1
-                    body_preview = _response_text_preview(response)
-                    last_error = RegridClientError(
-                        f"Regrid returned HTTP {response.status_code}. "
-                        f"Body preview={body_preview!r}"
-                    )
                     LOGGER.warning(
-                        "Regrid returned HTTP %s on attempt %s/%s. Body preview=%r. "
-                        "Switching proxy.",
+                        "Regrid returned HTTP %s on attempt %s/%s. Switching proxy.",
                         response.status_code,
                         attempt_number,
                         max_attempts,
-                        body_preview,
                     )
                     self.current_proxy = self._get_next_proxy()
                     continue
                 LOGGER.info("Regrid request returned HTTP %s.", response.status_code)
                 return response
-            except ProxyError as exc:
+            except ProxyError:
                 attempts += 1
-                last_error = exc
                 elapsed = time.monotonic() - start
                 LOGGER.warning(
-                    "Regrid smart proxy failed on attempt %s/%s after %.3fs: %s. Switching proxy.",
+                    "Regrid smart proxy failed on attempt %s/%s after %.3fs. Switching proxy.",
                     attempt_number,
                     max_attempts,
                     elapsed,
-                    exc,
                 )
                 self.current_proxy = self._get_next_proxy()
-            except requests.Timeout as exc:
+            except requests.Timeout:
                 attempts += 1
-                last_error = exc
                 elapsed = time.monotonic() - start
                 LOGGER.warning(
-                    "Regrid GET attempt %s/%s timed out after %.3fs: %s. Switching proxy.",
+                    "Regrid GET attempt %s/%s timed out after %.3fs. Switching proxy.",
                     attempt_number,
                     max_attempts,
                     elapsed,
-                    exc,
                 )
                 self.current_proxy = self._get_next_proxy()
             except requests.RequestException:
-                raise
-        raise RegridClientError(f"All Regrid smart proxy attempts failed. Last error: {last_error}")
+                raise RegridClientError("Parcel request failed.") from None
+        raise RegridClientError("All Regrid smart proxy attempts failed.") from None
 
 
 def canonical_parcel_record_from_regrid(record: RegridParcelLookupRecord) -> ParcelRecord:
@@ -781,6 +768,19 @@ class RegridParcelSourceConnector(SourceConnector):
                     "The parcel lookup exceeded its response deadline. Retry after it finishes."
                 ],
             )
+        except RegridAmbiguousParcelError as error:
+            return SourceResult(
+                source_id=self.source_id,
+                status=SourceResultStatus.PARTIAL,
+                warnings=["Parcel search returned multiple candidates. Narrow the address."],
+                requires_human_review=True,
+                metadata={
+                    "result_count": len(error.candidates),
+                    "candidates": [
+                        candidate.model_dump(mode="json") for candidate in error.candidates
+                    ],
+                },
+            )
         except Exception:
             return SourceResult(
                 source_id=self.source_id,
@@ -922,14 +922,6 @@ def _redacted_proxy_url(value: str) -> str:
     text = str(value)
     text = re.sub(r"//([^:@/\s]+):([^@/\s]+)@", "//***:***@", text)
     return re.sub(r"^([^:@/\s]+):([^@/\s]+)@", "***:***@", text)
-
-
-def _response_text_preview(response: requests.Response, limit: int = 240) -> str:
-    try:
-        text = response.text
-    except Exception:
-        return ""
-    return " ".join(text.split())[:limit]
 
 
 def _normalize_county(value: Any) -> str | None:

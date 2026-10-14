@@ -25,6 +25,7 @@ class TitleMCPSettings(BaseSettings):
 
     state_backend: Literal["memory", "postgres"] = "memory"
     postgres_dsn: str | None = None
+    readiness_timeout_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
 
     mcp_transport: Literal["stdio", "sse", "streamable-http"] = "stdio"
     mcp_host: str = "127.0.0.1"

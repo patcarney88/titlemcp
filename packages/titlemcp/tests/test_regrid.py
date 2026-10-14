@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
+import secrets
 import threading
+import traceback
 import unittest
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import requests
+from urllib3.connectionpool import HTTPConnectionPool
+from urllib3.response import HTTPResponse
 
 from title_mcp.domain.models import Jurisdiction
+from title_mcp.observability.logging import configure_logging
 from title_mcp.settings import TitleMCPSettings
 from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus
 from title_mcp.sources.regrid import (
@@ -214,6 +223,178 @@ class RegridTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.metadata["smart_proxy_enabled"])
 
 
+class RegridPrivacyTests(unittest.TestCase):
+    def test_application_sink_blocks_real_transport_url_diagnostics(self):
+        marker = secrets.token_hex(12)
+        stream = io.StringIO()
+        connection = Mock()
+        connection.is_closed = False
+        connection.proxy = None
+        connection.getresponse.return_value = HTTPResponse(
+            body=io.BytesIO(b"{}"),
+            headers={"Content-Length": "2"},
+            status=200,
+            version=11,
+            preload_content=False,
+        )
+        root = logging.getLogger()
+        with patch.object(root, "handlers", []), patch.object(root, "level", root.level):
+            with patch("sys.stderr", stream):
+                configure_logging("DEBUG")
+            with requests.Session() as session:
+                session.trust_env = False
+                with patch.object(HTTPConnectionPool, "_get_conn", return_value=connection):
+                    response = session.get(
+                        "http://parcel.example/search.json", params={"query": marker}, timeout=1
+                    )
+                self.assertEqual(response.json(), {})
+            for logger in ("requests", "requests.adapters", "urllib3.connectionpool"):
+                try:
+                    raise ValueError(marker)
+                except ValueError:
+                    logging.getLogger(logger).exception(marker)
+            logging.getLogger("title_mcp.sources.regrid").info("safe-status-marker")
+        self.assertIn(marker, connection.request.call_args.args[1])
+        self.assertNotIn(marker, stream.getvalue())
+        self.assertIn("safe-status-marker", stream.getvalue())
+
+    def test_retry_refresh_and_query_fallback_preserve_legitimate_requests(self):
+        marker = secrets.token_hex(12)
+        for statuses in ([429, 500], [503]):
+            session = _RetryRegridSession(statuses, marker)
+            with (
+                self.subTest(statuses=statuses),
+                self.assertLogs("title_mcp.sources.regrid", level="DEBUG") as captured,
+            ):
+                service = RegridParcelQueryService(
+                    smart_proxy=f"user:{marker}@proxy.example",
+                    proxy_port_start=10001,
+                    proxy_port_end=10003,
+                    max_proxy_attempts=3,
+                    session=session,
+                )
+                record = service.lookup("100 Example Ave, Columbus, OH")
+            self.assertIsNotNone(record)
+            self.assertNotIn(marker, "\n".join(captured.output))
+            self.assertTrue(all(marker in proxy["http"] for proxy in session.sent_proxies))
+            self.assertFalse(session.trust_env)
+            if statuses[0] == 429:
+                self.assertEqual(session.head_count, 2)
+            else:
+                self.assertEqual(record.source["search_query_used"], "100 Example Ave")
+
+    def test_debug_logs_never_include_proxy_userinfo_or_order_data(self):
+        marker = secrets.token_hex(12)
+        for userinfo in (f"user:{marker}", marker, f":{marker}", f"{marker}:"):
+            with (
+                self.subTest(userinfo=userinfo),
+                self.assertLogs("title_mcp.sources.regrid", level="DEBUG") as captured,
+            ):
+                service = RegridParcelQueryService(
+                    smart_proxy=f"{userinfo}@proxy.example",
+                    proxy_port_start=10001,
+                    proxy_port_end=10001,
+                    session=_FakeRegridSession(),
+                )
+                record = service.lookup("100 Private Review Address")
+            self.assertIsNotNone(record)
+            logs = "\n".join(captured.output)
+            self.assertNotIn(marker, logs)
+            self.assertNotIn("Private Review Address", logs)
+            self.assertNotIn("/us/oh/franklin/example", logs)
+
+    def test_error_logs_and_exception_tracebacks_do_not_echo_upstream_data(self):
+        marker = secrets.token_hex(12)
+        for mode in ("cookie", "proxy", "timeout", "request", "http", "server", "unavailable"):
+            with (
+                self.subTest(mode=mode),
+                self.assertLogs("title_mcp.sources.regrid", level="DEBUG") as captured,
+            ):
+                try:
+                    service = RegridParcelQueryService(
+                        smart_proxy=f"user:{marker}@proxy.example",
+                        proxy_port_start=10001,
+                        proxy_port_end=10001,
+                        max_proxy_attempts=1,
+                        session=_SensitiveFailureSession(mode, marker),
+                    )
+                    service.lookup("100 Private Review Address")
+                except Exception as error:
+                    rendered = "".join(traceback.format_exception(error))
+                else:
+                    self.fail("Synthetic upstream failure must not become a successful lookup")
+            self.assertNotIn(marker, "\n".join(captured.output))
+            self.assertNotIn(marker, rendered)
+            self.assertNotIn("Private Review Address", "\n".join(captured.output))
+
+
+class RegridSelectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_invalid_candidates_do_not_escape_in_service_tracebacks(self):
+        marker = secrets.token_hex(12)
+        service = RegridParcelQueryService(
+            smart_proxy="proxy.example",
+            proxy_port_start=10001,
+            proxy_port_end=10001,
+            session=_AmbiguousRegridSession(
+                candidates=[{"label": {"private": marker}}, {"label": "second"}]
+            ),
+        )
+        try:
+            service.lookup("100 Private Review Address")
+        except Exception as error:
+            rendered = "".join(traceback.format_exception(error))
+        else:
+            self.fail("Invalid upstream candidates must fail safely")
+        self.assertNotIn(marker, rendered)
+        self.assertIn("Parcel response was invalid", rendered)
+
+    async def test_multiple_candidates_are_partial_without_fetching_a_selected_parcel(self):
+        session = _AmbiguousRegridSession()
+        service = RegridParcelQueryService(
+            smart_proxy="proxy.example",
+            proxy_port_start=10001,
+            proxy_port_end=10001,
+            session=session,
+        )
+        connector = RegridParcelSourceConnector(service=service)
+        result = await connector.query(
+            SourceQuery(
+                jurisdiction=Jurisdiction(country="US"),
+                kind=SourceKind.VENDOR_API,
+                criteria={"address": "200 Intended Avenue"},
+            )
+        )
+        self.assertEqual(result.status, SourceResultStatus.PARTIAL)
+        self.assertEqual(result.records, [])
+        self.assertTrue(result.requires_human_review)
+        self.assertEqual(result.metadata["result_count"], 2)
+        self.assertEqual(
+            [candidate["label"] for candidate in result.metadata["candidates"]],
+            ["100 Other Lane", "200 Intended Avenue"],
+        )
+        self.assertIn("Narrow", result.warnings[0])
+        self.assertEqual(session.detail_requests, [])
+
+    async def test_empty_search_stays_no_results(self):
+        session = _AmbiguousRegridSession(candidates=[])
+        service = RegridParcelQueryService(
+            smart_proxy="proxy.example",
+            proxy_port_start=10001,
+            proxy_port_end=10001,
+            session=session,
+        )
+        connector = RegridParcelSourceConnector(service=service)
+        result = await connector.query(
+            SourceQuery(
+                jurisdiction=Jurisdiction(country="US"),
+                kind=SourceKind.VENDOR_API,
+                criteria={"address": "200 Intended Avenue"},
+            )
+        )
+        self.assertEqual(result.status, SourceResultStatus.NO_RESULTS)
+        self.assertEqual(session.detail_requests, [])
+
+
 class _FakeRegridResponse:
     def __init__(
         self,
@@ -281,6 +462,77 @@ class _CommaSensitiveRegridSession(_FakeRegridSession):
                     status_code=503,
                     text='{ "status": "error", "code": "503", "message": "Service Unavailable" }',
                 )
+        return super().get(url, *args, **kwargs)
+
+
+class _RetryRegridSession(_FakeRegridSession):
+    def __init__(self, statuses, marker):
+        self.statuses = list(statuses)
+        self.marker = marker
+        self.head_count = 0
+        self.sent_proxies = []
+
+    def head(self, *args, **kwargs):
+        self.head_count += 1
+        self.sent_proxies.append(kwargs["proxies"])
+        return super().head(*args, **kwargs)
+
+    def get(self, url, *args, **kwargs):
+        self.sent_proxies.append(kwargs["proxies"])
+        if self.statuses:
+            return _FakeRegridResponse(
+                {}, status_code=self.statuses.pop(0), text="Service Unavailable " + self.marker
+            )
+        return super().get(url, *args, **kwargs)
+
+
+class _SensitiveFailureSession(_FakeRegridSession):
+    def __init__(self, mode, marker):
+        self.mode = mode
+        self.marker = marker
+
+    def head(self, *args, **kwargs):
+        if self.mode == "cookie":
+            raise requests.ConnectionError(self.marker)
+        return super().head(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        failures = {
+            "proxy": requests.exceptions.ProxyError,
+            "timeout": requests.Timeout,
+            "request": requests.ConnectionError,
+        }
+        if self.mode in failures:
+            raise failures[self.mode](self.marker)
+        if self.mode == "http":
+            response = _FakeRegridResponse({}, status_code=400)
+            response.raise_for_status = lambda: self._http_error()
+            return response
+        status = 503 if self.mode == "unavailable" else 500
+        return _FakeRegridResponse(
+            {}, status_code=status, text="Service Unavailable " + self.marker
+        )
+
+    def _http_error(self):
+        raise requests.HTTPError(self.marker)
+
+
+class _AmbiguousRegridSession(_FakeRegridSession):
+    def __init__(self, candidates=None):
+        self.candidates = (
+            [
+                {"label": "100 Other Lane", "path": "/us/oh/franklin/other"},
+                {"label": "200 Intended Avenue", "path": "/us/oh/franklin/intended"},
+            ]
+            if candidates is None
+            else candidates
+        )
+        self.detail_requests = []
+
+    def get(self, url, *args, **kwargs):
+        if url.endswith("search.json"):
+            return _FakeRegridResponse(self.candidates)
+        self.detail_requests.append(url)
         return super().get(url, *args, **kwargs)
 
 

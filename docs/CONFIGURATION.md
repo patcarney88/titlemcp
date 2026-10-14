@@ -90,6 +90,20 @@ Local development defaults to in-memory state:
 TITLE_MCP_STATE_BACKEND=memory
 ```
 
+`/readyz` requires instance authorization and probes current storage on every
+request. Postgres checks acquire a current connection and read the workflow table
+without fetching order data or changing schema. The recovery loop must also be
+running. `TITLE_MCP_READINESS_TIMEOUT_SECONDS` bounds the probe (default 2 seconds;
+allowed range 0.1–30 seconds). Failures return a generic HTTP 503; `/healthz`
+continues to report liveness. Custom repository implementations must implement
+the asynchronous `check_health(timeout_seconds=...)` contract. Failed or timed-out
+Postgres probes terminate their acquired connection rather than waiting for an
+unbounded reset; successful probes return it to the pool.
+
+Application logs omit Requests/urllib3 transport diagnostics, which can include
+full query URLs and raw exceptions even during ordinary DEBUG logging. Connector
+status, attempt counts and timing remain available without order/provider payloads.
+
 Postgres:
 
 ```env

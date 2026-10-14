@@ -16,6 +16,11 @@ class InMemoryWorkflowRepository(WorkflowRepository):
     async def initialize(self) -> None:
         return None
 
+    async def check_health(self, *, timeout_seconds: float = 2.0) -> None:
+        async with asyncio.timeout(timeout_seconds):
+            async with self._lock:
+                pass
+
     async def save(self, record: WorkflowRecord) -> WorkflowRecord:
         async with self._lock:
             current = self._records.get(record.id)
