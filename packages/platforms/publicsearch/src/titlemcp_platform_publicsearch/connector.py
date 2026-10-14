@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
+from websockets.exceptions import WebSocketException
+
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import MortgageReleaseQuery
 from title_mcp.sources import (
@@ -17,8 +19,6 @@ from title_mcp.sources import (
     find_mortgage_release,
     release_source_result,
 )
-from websockets.exceptions import WebSocketException
-
 from titlemcp_platform_publicsearch.client import (
     PublicSearchClient,
     PublicSearchProtocolError,

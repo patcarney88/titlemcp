@@ -13,15 +13,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # in X-Forwarded-Proto. Trusting it lets the catalog at / advertise https URLs.
 ENV FORWARDED_ALLOW_IPS=*
 
-# The package takes its version from the release tag, and a build context has no
-# .git to read it from. A release image is built with its number:
-#   docker build --build-arg TITLEMCP_VERSION=0.3.6 .
-# Without one, the image is the latest release on PyPI plus this source tree,
-# for example 0.3.6+source, which still satisfies jurisdiction packages that
-# require a minimum core version.
+# Build context has no .git. The caller must supply both identities; no registry
+# lookup may assign another release's identity to this source tree.
 ARG TITLEMCP_VERSION=
+ARG SOURCE_REVISION=
+LABEL org.opencontainers.image.version=$TITLEMCP_VERSION \
+    org.opencontainers.image.revision=$SOURCE_REVISION
 
 WORKDIR /app
+
+COPY scripts/validate_image_identity.py scripts/validate_image_identity.py
+COPY constraints-docker.txt constraints-docker.txt
+RUN python scripts/validate_image_identity.py "$TITLEMCP_VERSION" "$SOURCE_REVISION"
 
 # A system user's home is /nonexistent unless one is given. Caches such as the
 # OFAC sanctions lists are kept under ~/.cache, so the user needs a real one.
@@ -41,9 +44,9 @@ COPY packages/jurisdictions/us/oh/franklin/recorder/pyproject.toml \
 COPY packages/jurisdictions/us/oh/franklin/recorder/src \
      packages/jurisdictions/us/oh/franklin/recorder/src
 
-RUN python -m pip install --upgrade pip \
-    && released=$(python -c "import json, urllib.request; print(json.load(urllib.request.urlopen('https://pypi.org/pypi/titlemcp/json', timeout=30))['info']['version'])") \
-    && SETUPTOOLS_SCM_PRETEND_VERSION="${TITLEMCP_VERSION:-$released+source}" python -m pip install \
+RUN python -m pip install -c constraints-docker.txt hatchling hatch-vcs \
+    && SETUPTOOLS_SCM_PRETEND_VERSION="$TITLEMCP_VERSION" python -m pip install \
+        --no-build-isolation -c constraints-docker.txt \
         "packages/titlemcp[postgres]" \
         "packages/jurisdictions/us/oh/franklin/recorder"
 

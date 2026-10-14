@@ -9,7 +9,6 @@ from typing import Any
 
 from title_mcp.domain.auditor import PropertyAssessmentRecord
 from title_mcp.domain.tax import TaxInstallment, TaxParcel, TaxYear
-
 from titlemcp_platform_iasworld.config import IasWorldSiteConfig, TaxPage
 from titlemcp_platform_iasworld.models import IasWorldTaxPages
 

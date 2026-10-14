@@ -18,22 +18,32 @@ from title_mcp.domain.models import (
 )
 from title_mcp.observability import current_trace_id, get_logger, trace_span
 from title_mcp.security import AuthenticatedPrincipal, require_human_reviewer
-from title_mcp.state.base import WorkflowRepository
+from title_mcp.state.base import WorkflowConflictError, WorkflowRepository
 
 
 class BackgroundTaskManager:
     def __init__(self, concurrency: int = 4) -> None:
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
+        self._failures = 0
 
     def enqueue(self, work: Callable[[], Awaitable[None]]) -> None:
         task = asyncio.create_task(self._run(work))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task: asyncio.Task[None]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self._failures += 1
+            get_logger(__name__).error("workflow.background_failed")
 
     async def drain(self) -> None:
         if self._tasks:
-            await asyncio.gather(*list(self._tasks))
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        if self._failures:
+            self._failures = 0
+            raise RuntimeError("Background workflow work failed; inspect persisted state.")
 
     async def shutdown(self) -> None:
         for task in list(self._tasks):
@@ -62,6 +72,9 @@ class WorkflowEngine:
         self._background = BackgroundTaskManager(concurrency)
         self._auto_start = auto_start
         self._logger = get_logger(__name__)
+        self._enqueued: set[str] = set()
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_cursor: str | None = None
 
     async def create(self, request: WorkflowRequest) -> WorkflowRecord:
         with trace_span(
@@ -108,22 +121,93 @@ class WorkflowEngine:
                 payload={"adapter_id": plan.adapter_id, "steps": len(plan.steps)},
                 trace_id=trace_id,
             )
-            await self._repository.save(record)
+            record = await self._repository.save(record)
 
             if self._auto_start and record.status != WorkflowStatus.NEEDS_HUMAN_REVIEW:
                 self.enqueue(record.id)
             return record
 
     def enqueue(self, workflow_id: str) -> None:
-        self._background.enqueue(lambda: self.run_once(workflow_id))
+        if workflow_id not in self._enqueued:
+            self._enqueued.add(workflow_id)
+            self._background.enqueue(lambda: self._run_background(workflow_id))
+
+    async def _run_background(self, workflow_id: str) -> None:
+        try:
+            await self.run_once(workflow_id)
+        except WorkflowConflictError:
+            # Another writer is making progress. Leave queued work for a later sweep.
+            self._logger.warning("workflow.busy", extra={"workflow_id": workflow_id})
+        except Exception:
+            self._logger.error("workflow.execution_failed", extra={"workflow_id": workflow_id})
+            # A failed stale worker must never overwrite a human decision.
+            for _ in range(4):
+                record = await self._repository.get(workflow_id)
+                if record is None or record.status not in {
+                    WorkflowStatus.QUEUED,
+                    WorkflowStatus.RUNNING,
+                }:
+                    return
+                record.status = WorkflowStatus.FAILED
+                record.add_audit("workflow.execution_failed", payload={"recoverable": True})
+                record.result["error"] = "Workflow planning failed. Staff review is required."
+                try:
+                    await self._repository.save(record)
+                    break
+                except WorkflowConflictError:
+                    continue
+            raise RuntimeError("Workflow planning failed.") from None
+        finally:
+            self._enqueued.discard(workflow_id)
+
+    async def recover_page(self, *, limit: int = 50) -> int:
+        records = await self._repository.list_recoverable(
+            after_id=self._recovery_cursor, limit=limit
+        )
+        self._recovery_cursor = records[-1].id if len(records) == limit else None
+        for record in records:
+            self.enqueue(record.id)
+        return len(records)
+
+    async def start_recovery(self) -> None:
+        if self._recovery_task is not None:
+            return
+        await self.recover_page()
+        self._recovery_task = asyncio.create_task(self._recover_periodically())
+
+    async def _recover_periodically(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self.recover_page()
+            except Exception:
+                self._logger.error("workflow.recovery_failed")
 
     async def run_once(self, workflow_id: str) -> WorkflowRecord | None:
+        for _ in range(4):
+            try:
+                return await self._transition_once(workflow_id)
+            except WorkflowConflictError:
+                # Reload and re-check review state rather than replaying a stale plan.
+                continue
+        raise WorkflowConflictError("Workflow remained busy; retry after reloading.")
+
+    async def _transition_once(self, workflow_id: str) -> WorkflowRecord | None:
         with trace_span("workflow.run_once", workflow_id=workflow_id) as trace_id:
             record = await self._repository.get(workflow_id)
             if record is None:
                 self._logger.warning("workflow.not_found", extra={"workflow_id": workflow_id})
                 return None
 
+            if record.status in {
+                WorkflowStatus.COMPLETED,
+                WorkflowStatus.FAILED,
+                WorkflowStatus.CANCELLED,
+                WorkflowStatus.WAITING_ON_EXTERNAL,
+            }:
+                return record
+
+            gate_changed = False
             if (
                 record.review is None
                 or record.review.status is ReviewStatus.NOT_REQUIRED
@@ -138,7 +222,10 @@ class WorkflowEngine:
                 record.review = HumanReviewRequest(
                     prompt="An authenticated human must review this workflow before execution."
                 )
+                gate_changed = True
             if record.review.status == ReviewStatus.PENDING:
+                if record.status is WorkflowStatus.NEEDS_HUMAN_REVIEW and not gate_changed:
+                    return record
                 record.status = WorkflowStatus.NEEDS_HUMAN_REVIEW
                 record.add_audit(
                     "workflow.paused_for_review",
@@ -161,7 +248,7 @@ class WorkflowEngine:
 
             for task in record.tasks:
                 task.normalize_legacy_placeholder()
-                if task.status != TaskStatus.QUEUED:
+                if task.status not in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
                     continue
                 task.status = TaskStatus.WAITING_ON_EXTERNAL
                 task.result = {
@@ -238,4 +325,11 @@ class WorkflowEngine:
         await self._background.drain()
 
     async def shutdown(self) -> None:
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            self._recovery_task = None
         await self._background.shutdown()
+        # Tasks cancelled while waiting for the semaphore never enter the wrapper's finally.
+        self._enqueued.clear()
+        self._recovery_cursor = None

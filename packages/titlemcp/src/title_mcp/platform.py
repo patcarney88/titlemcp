@@ -92,6 +92,10 @@ class TitleMCPPlatform:
         self._init_lock = asyncio.Lock()
         self._load_plugins = load_plugins_flag
 
+    @property
+    def plugin_loading_enabled(self) -> bool:
+        return self._load_plugins
+
     async def initialize(self) -> None:
         async with self._init_lock:
             if self._initialized:
@@ -108,10 +112,13 @@ class TitleMCPPlatform:
                     )
                 )
             await self.repository.initialize()
+            await self.engine.start_recovery()
             self._initialized = True
 
     async def shutdown(self) -> None:
-        await self.engine.shutdown()
-        close = getattr(self.repository, "close", None)
-        if close:
-            await close()
+        async with self._init_lock:
+            await self.engine.shutdown()
+            close = getattr(self.repository, "close", None)
+            if close:
+                await close()
+            self._initialized = False

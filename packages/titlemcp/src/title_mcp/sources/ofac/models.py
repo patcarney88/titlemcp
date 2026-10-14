@@ -79,6 +79,8 @@ class ListVersion(BaseModel):
     sha256: str
     source_url: str
     retrieved_at: str
+    refresh_failed: bool = False
+    stale: bool = False
 
 
 class ScreeningParty(BaseModel):

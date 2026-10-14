@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from title_mcp.domain.models import WorkflowKind, WorkflowRecord, WorkflowStatus
-from title_mcp.state.base import WorkflowRepository
+from title_mcp.state.base import WorkflowConflictError, WorkflowRepository
 
 
 class PostgresWorkflowRepository(WorkflowRepository):
@@ -49,21 +49,31 @@ class PostgresWorkflowRepository(WorkflowRepository):
 
     async def save(self, record: WorkflowRecord) -> WorkflowRecord:
         await self._ensure_pool()
-        payload = record.model_dump(mode="json")
+        stored = record.model_copy(deep=True)
+        stored.revision += 1
+        payload = stored.model_dump(mode="json")
+        # Revision-zero records include JSON saved before optimistic concurrency existed.
+        insert = """
+            INSERT INTO title_mcp_workflows
+                (id, kind, status, file_number, jurisdiction, record, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+            ON CONFLICT (id) DO UPDATE SET
+                kind = EXCLUDED.kind, status = EXCLUDED.status,
+                file_number = EXCLUDED.file_number, jurisdiction = EXCLUDED.jurisdiction,
+                record = EXCLUDED.record, updated_at = EXCLUDED.updated_at
+            WHERE COALESCE((title_mcp_workflows.record->>'revision')::bigint, 0) = $9
+            RETURNING record
+        """
+        update = """
+            UPDATE title_mcp_workflows SET
+                kind = $2, status = $3, file_number = $4, jurisdiction = $5::jsonb,
+                record = $6::jsonb, created_at = $7, updated_at = $8
+            WHERE id = $1 AND COALESCE((record->>'revision')::bigint, 0) = $9
+            RETURNING record
+        """
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO title_mcp_workflows
-                    (id, kind, status, file_number, jurisdiction, record, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
-                ON CONFLICT (id) DO UPDATE SET
-                    kind = EXCLUDED.kind,
-                    status = EXCLUDED.status,
-                    file_number = EXCLUDED.file_number,
-                    jurisdiction = EXCLUDED.jurisdiction,
-                    record = EXCLUDED.record,
-                    updated_at = EXCLUDED.updated_at
-                """,
+            row = await conn.fetchrow(
+                insert if record.revision == 0 else update,
                 record.id,
                 record.kind.value,
                 record.status.value,
@@ -72,8 +82,11 @@ class PostgresWorkflowRepository(WorkflowRepository):
                 json.dumps(payload),
                 record.created_at,
                 record.updated_at,
+                record.revision,
             )
-        return record.model_copy(deep=True)
+        if row is None:
+            raise WorkflowConflictError("Workflow changed; reload before saving.")
+        return self._row_to_record(row)
 
     async def get(self, workflow_id: str) -> WorkflowRecord | None:
         await self._ensure_pool()
@@ -83,6 +96,20 @@ class PostgresWorkflowRepository(WorkflowRepository):
                 workflow_id,
             )
         return self._row_to_record(row) if row else None
+
+    async def list_recoverable(
+        self, *, after_id: str | None = None, limit: int = 50
+    ) -> list[WorkflowRecord]:
+        await self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT record FROM title_mcp_workflows
+                WHERE status IN ('queued', 'running') AND ($1::text IS NULL OR id > $1)
+                ORDER BY id LIMIT $2""",
+                after_id,
+                limit,
+            )
+        return [self._row_to_record(row) for row in rows]
 
     async def list(
         self,

@@ -95,6 +95,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+# Source archives without Git metadata remain explicitly non-release builds.
+fallback-version = "0.0.0+archive"
 # The package sits two directories below the repository root, where the tags are.
 raw-options = { root = "../..", version_scheme = "guess-next-dev", local_scheme = "node-and-date" }
 

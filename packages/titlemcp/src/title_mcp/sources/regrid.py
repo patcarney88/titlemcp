@@ -733,41 +733,59 @@ class RegridParcelSourceConnector(SourceConnector):
     ) -> None:
         self.settings = settings or get_settings()
         self._service = service
+        self._pending_lookup: asyncio.Task[Any] | None = None
+        self._query_lock = asyncio.Lock()
 
     def supports(self, jurisdiction: Jurisdiction, kind: SourceKind | None = None) -> bool:
         kind_matches = kind is None or kind == self.descriptor.kind
         return kind_matches and self.descriptor.jurisdiction_scope.matches(jurisdiction)
 
     async def query(self, query: SourceQuery) -> SourceResult:
-        service = self._service
-        if service is None:
-            try:
-                service = self._service_from_settings()
-            except RegridProxyConfigurationError as exc:
-                return SourceResult(
-                    source_id=self.source_id,
-                    status=SourceResultStatus.REQUIRES_CONFIGURATION,
-                    warnings=[str(exc)],
-                    metadata={
-                        "required_env_vars": ["TITLE_MCP_SMART_PROXY"],
-                        "legacy_env_vars": ["SMART_PROXY"],
-                    },
-                )
-            except Exception as exc:
-                return SourceResult(
-                    source_id=self.source_id,
-                    status=SourceResultStatus.FAILED,
-                    warnings=[f"Failed to initialize Regrid parcel lookup: {exc}"],
-                )
-
         try:
             lookup_query = RegridParcelLookupQuery.model_validate(query.criteria)
-            record = await asyncio.to_thread(service.lookup, lookup_query.address)
-        except Exception as exc:
+        except ValueError:
             return SourceResult(
                 source_id=self.source_id,
                 status=SourceResultStatus.FAILED,
-                warnings=[f"Regrid parcel lookup failed: {exc}"],
+                warnings=["A valid address is required for the parcel lookup."],
+            )
+
+        # A timed-out caller cannot interrupt a blocking Requests call. Retain
+        # one worker until it finishes instead of starting overlapping sessions.
+        async with self._query_lock:
+            if self._pending_lookup is not None and not self._pending_lookup.done():
+                return SourceResult(
+                    source_id=self.source_id,
+                    status=SourceResultStatus.FAILED,
+                    warnings=["A previous parcel lookup is still finishing. Retry later."],
+                )
+            pending = asyncio.create_task(asyncio.to_thread(self._lookup_blocking, lookup_query))
+            pending.add_done_callback(self._consume_lookup_error)
+            self._pending_lookup = pending
+        try:
+            record = await asyncio.wait_for(
+                asyncio.shield(pending), timeout=self.settings.regrid_query_timeout_seconds
+            )
+        except RegridProxyConfigurationError:
+            return SourceResult(
+                source_id=self.source_id,
+                status=SourceResultStatus.REQUIRES_CONFIGURATION,
+                warnings=["Set TITLE_MCP_SMART_PROXY before querying parcels."],
+                metadata={"required_env_vars": ["TITLE_MCP_SMART_PROXY"]},
+            )
+        except TimeoutError:
+            return SourceResult(
+                source_id=self.source_id,
+                status=SourceResultStatus.FAILED,
+                warnings=[
+                    "The parcel lookup exceeded its response deadline. Retry after it finishes."
+                ],
+            )
+        except Exception:
+            return SourceResult(
+                source_id=self.source_id,
+                status=SourceResultStatus.FAILED,
+                warnings=["Parcel lookup failed. Check source configuration and availability."],
             )
 
         if record is None:
@@ -799,6 +817,15 @@ class RegridParcelSourceConnector(SourceConnector):
                 "smart_proxy_enabled": True,
             },
         )
+
+    def _lookup_blocking(self, query: RegridParcelLookupQuery) -> Any:
+        service = self._service or self._service_from_settings()
+        return service.lookup(query.address)
+
+    @staticmethod
+    def _consume_lookup_error(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     def _service_from_settings(self) -> RegridParcelQueryService:
         smart_proxy = self.settings.smart_proxy

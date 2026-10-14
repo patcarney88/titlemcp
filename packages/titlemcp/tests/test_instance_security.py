@@ -6,6 +6,7 @@ import unittest
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.testclient import TestClient
+
 from title_mcp.adapters import create_default_adapter_registry
 from title_mcp.domain.models import (
     AuditActor,
@@ -267,10 +268,11 @@ class HumanReviewBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.record.review.status = status
                 self.record.review.reviewer = "unverified-label"
                 self.record.review.authenticated_reviewer = None
-                await self.repository.save(self.record)
+                self.record = await self.repository.save(self.record)
                 record = await self.engine.run_once(self.record.id)
                 self.assertIs(record.status, WorkflowStatus.NEEDS_HUMAN_REVIEW)
                 self.assertTrue(all(task.status is TaskStatus.QUEUED for task in record.tasks))
+                self.record = record
 
 
 if __name__ == "__main__":

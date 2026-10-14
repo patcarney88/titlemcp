@@ -10,7 +10,6 @@ from title_mcp.domain.recorder import (
     index_search_name,
     normalize_instrument_number,
 )
-
 from titlemcp_platform_countyfusion.client import CountyFusionClient
 
 #: Words that mark a business's name, which is indexed as written.

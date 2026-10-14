@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
@@ -17,6 +20,69 @@ from title_mcp.sources.regrid import (
 
 
 class RegridTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocking_factory_runs_off_loop_and_invalid_query_skips_it(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def factory():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("Test did not release blocking factory")
+            return _FakeRegridService()
+
+        connector = RegridParcelSourceConnector(settings=TitleMCPSettings())
+        query = SourceQuery(
+            jurisdiction=Jurisdiction(country="US"),
+            kind=SourceKind.VENDOR_API,
+            criteria={"address": "100 Example Ave"},
+        )
+        with patch.object(connector, "_service_from_settings", side_effect=factory) as mocked:
+            invalid = await connector.query(query.model_copy(update={"criteria": {}}))
+            self.assertEqual(invalid.status, SourceResultStatus.FAILED)
+            mocked.assert_not_called()
+            pending = asyncio.create_task(connector.query(query))
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.001)
+                self.assertTrue(
+                    entered.is_set(), "Event loop must run during service initialization"
+                )
+                busy = await connector.query(query)
+                self.assertEqual(busy.status, SourceResultStatus.FAILED)
+                self.assertIn("finishing", busy.warnings[0])
+            finally:
+                release.set()
+                self.assertEqual((await pending).status, SourceResultStatus.SUCCEEDED)
+
+    async def test_response_deadline_does_not_start_overlapping_threads(self):
+        release = threading.Event()
+        calls = []
+
+        class BlockingService:
+            def lookup(self, address):
+                calls.append(address)
+                release.wait(2)
+                return _FakeRegridService().lookup(address)
+
+        settings = TitleMCPSettings()
+        settings.regrid_query_timeout_seconds = 0.01  # fake-only deadline; production min is 1s
+        connector = RegridParcelSourceConnector(settings=settings, service=BlockingService())
+        query = SourceQuery(
+            jurisdiction=Jurisdiction(country="US"),
+            kind=SourceKind.VENDOR_API,
+            criteria={"address": "100 Example Ave"},
+        )
+        try:
+            result = await connector.query(query)
+            self.assertEqual(result.status, SourceResultStatus.FAILED)
+            self.assertIn("deadline", result.warnings[0])
+            self.assertEqual((await connector.query(query)).status, SourceResultStatus.FAILED)
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+            await connector._pending_lookup
+
     def test_generated_headers_look_browser_like(self) -> None:
         headers = generate_regrid_headers()
 

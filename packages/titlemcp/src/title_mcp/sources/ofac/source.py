@@ -40,7 +40,7 @@ class OfacScreeningQuery(BaseModel):
 
     parties: list[ScreeningParty] = Field(min_length=1, max_length=200)
     lists: list[SanctionsList] = Field(
-        default_factory=lambda: [SanctionsList.SDN, SanctionsList.CONSOLIDATED]
+        default_factory=lambda: [SanctionsList.SDN, SanctionsList.CONSOLIDATED], min_length=1
     )
     #: Screen only against entries added or changed in the latest list version.
     changes_only: bool = False
@@ -63,6 +63,7 @@ class OfacScreeningSourceConnector(SourceConnector):
             "env_vars": [
                 "TITLE_MCP_OFAC_CACHE_DIR",
                 "TITLE_MCP_OFAC_MAX_AGE_HOURS",
+                "TITLE_MCP_OFAC_MAX_SCREENING_AGE_HOURS",
                 "TITLE_MCP_OFAC_TIMEOUT_SECONDS",
             ],
             "official_docs": [
@@ -107,6 +108,10 @@ class OfacScreeningSourceConnector(SourceConnector):
 
     def screen(self, query: OfacScreeningQuery) -> OfacScreeningRecord:
         entries, versions = self._load(query)
+        for version in versions:
+            age = _age_days(version.retrieved_at)
+            if age is None or age * 24 > self.settings.ofac_max_screening_age_hours:
+                raise ValueError("OFAC list exceeds the maximum permitted screening age.")
         key = (*(v.sha256 for v in versions), str(query.changes_only))
         screener = self._screeners.get(key)
         if screener is None:
@@ -155,27 +160,28 @@ class OfacScreeningSourceConnector(SourceConnector):
             )
         try:
             record = await asyncio.to_thread(self.screen, screening)
-        except Exception as exc:  # noqa: BLE001  (reported, never raised to the tool)
+        except Exception:  # noqa: BLE001  (reported, never raised to the tool)
             return SourceResult(
                 source_id=self.source_id,
                 status=SourceResultStatus.FAILED,
                 warnings=[
-                    f"OFAC screening failed: {exc}. The lists download from "
-                    "sanctionslistservice.ofac.treas.gov; check network access or set "
-                    "TITLE_MCP_OFAC_CACHE_DIR to a folder holding SDN.XML."
+                    "OFAC screening unavailable: fresh, valid lists are required. Check "
+                    "network access, TITLE_MCP_OFAC_CACHE_DIR, and the configured maximum "
+                    "screening age. No screening outcome was produced."
                 ],
             )
         warnings: list[str] = []
         for version in record.lists:
             age = _age_days(version.retrieved_at)
-            if age is not None and age > 2:
+            if version.stale or version.refresh_failed:
                 warnings.append(
-                    f"The {version.sanctions_list.value} list copy is {age:.0f} days old "
-                    f"(published {version.publish_date}); it could not be refreshed."
+                    f"The {version.sanctions_list.value} list used a cached copy "
+                    f"(published {version.publish_date}, age {age * 24:.1f} hours); "
+                    "it is stale or its refresh failed. This screening is incomplete."
                 )
         return SourceResult(
             source_id=self.source_id,
-            status=SourceResultStatus.SUCCEEDED,
+            status=SourceResultStatus.PARTIAL if warnings else SourceResultStatus.SUCCEEDED,
             records=[record.model_dump(mode="json")],
             citations=[
                 SourceCitation(
@@ -283,6 +289,11 @@ def list_status(
                 "TITLE_MCP_OFAC_CACHE_DIR."
             )
             continue
+        age = _age_days(version.retrieved_at)
+        if age is None or age * 24 > connector.settings.ofac_max_screening_age_hours:
+            warnings.append(f"The {sanctions_list.value} list exceeds the permitted screening age.")
+        elif version.stale or version.refresh_failed:
+            warnings.append(f"The {sanctions_list.value} cached copy is stale or refresh failed.")
         status.append(
             {
                 **version.model_dump(mode="json"),

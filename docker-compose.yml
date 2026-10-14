@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        TITLEMCP_VERSION: ${TITLEMCP_VERSION:?Set an explicit local build version}
+        SOURCE_REVISION: ${SOURCE_REVISION:?Set the full source commit SHA}
     image: razi-title-mcp:latest
     env_file:
       - path: .env

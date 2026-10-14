@@ -5,6 +5,7 @@ import unittest
 from datetime import date
 
 from pydantic import ValidationError
+
 from title_mcp.adapters.base import JurisdictionScope
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import (

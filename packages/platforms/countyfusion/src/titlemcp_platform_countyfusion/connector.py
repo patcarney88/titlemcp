@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from requests import RequestException
+
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.domain.recorder import IncompleteRecorderSearch, MortgageReleaseQuery
 from title_mcp.sources import (
@@ -18,7 +19,6 @@ from title_mcp.sources import (
     find_mortgage_release,
     release_source_result,
 )
-
 from titlemcp_platform_countyfusion.client import (
     CountyFusionClient,
     CountyFusionProtocolError,

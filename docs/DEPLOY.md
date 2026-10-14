@@ -1,7 +1,7 @@
 # Deploying TitleMCP
 
-Each button builds this repository's `Dockerfile` on the platform and runs the
-server over Streamable HTTP. When the deployment is up, it serves:
+This personal fork supports manual Docker builds with explicit version and source
+identity. Deployment has not been performed. When a configured server runs, it serves:
 
 | Path | What it is |
 | --- | --- |
@@ -9,11 +9,9 @@ server over Streamable HTTP. When the deployment is up, it serves:
 | `/` | A JSON catalog of the tools, resources and prompts, with the endpoint's full URL. |
 | `/healthz` | A health check. |
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/titlemcp/titlemcp)
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/titlemcp/titlemcp)
-[![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run?git_repo=https://github.com/titlemcp/titlemcp)
-[![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/titlemcp/titlemcp/tree/main)
-[![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&repository=github.com/titlemcp/titlemcp&branch=main&builder=dockerfile&name=titlemcp&ports=8000;http;/&env%5BPORT%5D=8000)
+The upstream hosting manifests remain reference material. They must be adapted
+to supply both required Docker build arguments; they are not one-click setups
+for this fork.
 
 ## Before you deploy
 
@@ -33,8 +31,11 @@ server over Streamable HTTP. When the deployment is up, it serves:
 - **Memory.** The server idles at about 60 MB. The first OFAC screening
   downloads and parses the sanctions lists and takes it to about 450 MB. A
   512 MB instance runs it; 1 GB leaves room.
-- **Version.** An image built from the repository reports the latest release on
-  PyPI plus `+source`, for example `0.3.6+source`.
+- **Version.** Supply `TITLEMCP_VERSION` and the full `SOURCE_REVISION` commit SHA.
+  Missing identity fails the build. No PyPI metadata request assigns a version.
+  `constraints-docker.txt` pins runtime and build dependencies for Python 3.12/Linux.
+  The base image still uses `python:3.12-slim`; pin its digest separately when a
+  reproducible release is authorized. Current checks do not establish bit-identical images.
 
 ## Platforms
 
@@ -79,15 +80,24 @@ in a URL, shell history or a shared configuration file.
 ## Build the image yourself
 
 ```bash
-docker build -t titlemcp .
+export SOURCE_REVISION=$(git rev-parse HEAD)
+export TITLEMCP_VERSION="0.3.7+fork.${SOURCE_REVISION}"
+docker build --build-arg TITLEMCP_VERSION --build-arg SOURCE_REVISION -t titlemcp .
 docker run --env-file .env -p 127.0.0.1:8000:8000 titlemcp
 ```
 
 A release image is built with its version:
 
 ```bash
-docker build --build-arg TITLEMCP_VERSION=0.3.6 -t titlemcp:0.3.6 .
+docker build --build-arg TITLEMCP_VERSION=0.3.7 \
+  --build-arg SOURCE_REVISION="$(git rev-parse v0.3.7^{commit})" -t titlemcp:0.3.7 .
 ```
+
+Build a release only from the corresponding clean tagged checkout. The fork
+example above is a local build identity, not an assertion of an upstream release.
+Regenerate dependency constraints deliberately after reviewing version changes:
+`uv pip compile --python-version 3.12 --python-platform x86_64-unknown-linux-gnu
+--output-file constraints-docker.txt scripts/docker-requirements.in`.
 
 For local work with MCP Inspector alongside, use `docker compose up --build` as
 described in the [README](../README.md#core-package).

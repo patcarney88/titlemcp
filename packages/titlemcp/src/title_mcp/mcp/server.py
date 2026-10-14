@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -25,13 +26,40 @@ from title_mcp.settings import TitleMCPSettings, get_settings
 class ProtectedMCPServer(MCPServer):
     """Apply the instance boundary to HTTP apps, including extension routes."""
 
-    def __init__(self, *args: Any, http_credential: SecretStr | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        http_credential: SecretStr | None = None,
+        platform: TitleMCPPlatform,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._http_credential = http_credential
+        self._platform = platform
 
     def _protect(self, app: Starlette) -> Starlette:
+        sdk_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: Starlette):
+            await self._platform.initialize()
+            try:
+                async with sdk_lifespan(app) as state:
+                    yield state
+            finally:
+                await self._platform.shutdown()
+
+        # App lifetime, not the SSE SDK's per-client lifespan.
+        app.router.lifespan_context = lifespan
         app.add_middleware(InstanceBearerAuth, credential=self._http_credential)
         return app
+
+    async def run_stdio_async(self) -> None:
+        await self._platform.initialize()
+        try:
+            await super().run_stdio_async()
+        finally:
+            await self._platform.shutdown()
 
     def streamable_http_app(self, **kwargs: Any) -> Starlette:
         return self._protect(super().streamable_http_app(**kwargs))
@@ -50,6 +78,7 @@ def create_mcp_server(
 
     mcp = ProtectedMCPServer(
         settings.app_name,
+        platform=platform,
         http_credential=settings.mcp_access_token,
         instructions=(
             "Tools coordinate title and real estate service workflows. "

@@ -103,6 +103,16 @@ Install the Postgres extra:
 .venv/bin/pip install -e "packages/titlemcp[postgres]"
 ```
 
+Repository saves require the revision returned by the latest read/save. A stale
+human review raises `WorkflowConflictError`; the trusted host must reload and ask
+the reviewer to decide again. Workers retry against current review state.
+Startup and five-second recovery sweeps page queued/running records in batches
+of 50. These transitions only plan work and are safe to replay. In-memory state
+cannot survive process loss; Postgres preserves it. Before adding real external
+executors, implement provider idempotency and distributed execution leases.
+Background planning failures persist a sanitized failure where storage is available;
+storage outages are logged and leave queued work eligible for a later sweep.
+
 ## Parcel Provider
 
 Parcel lookup requires smart proxy configuration.
@@ -114,6 +124,7 @@ TITLE_MCP_REGRID_PROXY_PORT_END=10999
 TITLE_MCP_REGRID_MAX_PROXY_ATTEMPTS=10
 TITLE_MCP_REGRID_TIMEOUT_SECONDS=10
 TITLE_MCP_REGRID_COOKIE_TIMEOUT_SECONDS=5
+TITLE_MCP_REGRID_QUERY_TIMEOUT_SECONDS=60
 ```
 
 Notes:
@@ -124,6 +135,10 @@ Notes:
 - The parcel connector disables `requests` environment proxy discovery so
   `TITLE_MCP_SMART_PROXY` is not mistaken for a generic proxy variable.
 - The connector logs each proxy attempt with credentials redacted.
+- Initialization and requests run in one background thread per connector. The
+  query deadline bounds the response, not Python thread termination. A timed-out
+  call can finish its bounded network attempts; overlapping calls return a busy
+  failure until it finishes.
 
 ## PACER
 
@@ -146,11 +161,16 @@ OFAC screening needs no credentials: the lists are public. They are downloaded f
 ```env
 TITLE_MCP_OFAC_CACHE_DIR=~/.cache/titlemcp/ofac
 TITLE_MCP_OFAC_MAX_AGE_HOURS=24
+TITLE_MCP_OFAC_MAX_SCREENING_AGE_HOURS=24
 TITLE_MCP_OFAC_TIMEOUT_SECONDS=120
 ```
 
-If a refresh fails, the cached copy is used and the result warns when it is more
-than two days old. With no cached copy and no network, screening returns `failed`.
+`MAX_AGE_HOURS` controls refresh attempts. `MAX_SCREENING_AGE_HOURS` is the hard
+maximum acceptable cache age, default 24 hours. After a failed refresh, a copy
+within that limit produces a `partial` screening with freshness metadata and a
+warning. An older copy or no valid copy produces `failed` with no screening
+outcome. Empty lists, inconsistent advertised counts and missing identifiers or
+names are rejected before atomically replacing a valid cache.
 
 ## SerpAPI
 
@@ -178,7 +198,8 @@ python samples/franklin_county_ollama/ollama_client.py --model qwen3:8b
 
 ## Extension Loading
 
-Installed packages are discovered through Python entry points by default.
+Most installed entry-point groups are discovered by default. County packages
+using `title_mcp.plugins` require explicit activation:
 
 ```env
 TITLE_MCP_LOAD_ENTRY_POINT_CAPABILITIES=true
@@ -190,6 +211,11 @@ TITLE_MCP_LOAD_ENTRY_POINT_PLUGINS=false
 ```
 
 Disable a group only for locked-down deployments or focused tests.
+
+Set `TITLE_MCP_LOAD_ENTRY_POINT_PLUGINS=true` to activate trusted installed county
+plugins. They execute Python code. A capability manifest can be visible while its
+plugin is disabled; verify `list_source_connectors` or the
+`registered_source_ids` field of `list_title_capabilities` for actual activation.
 
 ## AWS Textract
 

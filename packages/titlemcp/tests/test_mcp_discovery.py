@@ -6,6 +6,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from starlette.testclient import TestClient
+
 from title_mcp.mcp.server import create_mcp_server, transport_options
 from title_mcp.mcp.tool_catalog import _public_parcel_lookup_result
 from title_mcp.settings import TitleMCPSettings

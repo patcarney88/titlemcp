@@ -6,6 +6,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import requests
+
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
 from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus

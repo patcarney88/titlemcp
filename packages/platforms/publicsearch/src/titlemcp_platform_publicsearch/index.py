@@ -10,7 +10,6 @@ from title_mcp.domain.recorder import (
     index_search_name,
     normalize_instrument_number,
 )
-
 from titlemcp_platform_publicsearch.client import PublicSearchClient, PublicSearchQuery
 
 #: A name search for a common borrower returns hundreds of documents across a

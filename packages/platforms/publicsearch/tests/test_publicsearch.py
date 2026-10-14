@@ -6,9 +6,6 @@ import unittest
 from datetime import date
 from unittest import mock
 
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery
-from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_platform_publicsearch import (
     PublicSearchClient,
     PublicSearchProtocolError,
@@ -19,6 +16,10 @@ from titlemcp_platform_publicsearch import (
 )
 from titlemcp_platform_publicsearch.client import SESSION_SECONDS, _excerpt
 from titlemcp_platform_publicsearch.index import PublicSearchIndex
+
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery
+from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURES = json.loads((pathlib.Path(__file__).parent / "fixtures" / "documents.json").read_text())
 CONFIG = PublicSearchSiteConfig(

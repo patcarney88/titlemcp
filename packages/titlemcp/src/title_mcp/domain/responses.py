@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from title_mcp.capabilities.base import CapabilityManifest
 from title_mcp.domain.models import WorkflowAction, WorkflowKind, WorkflowStatus
 
 
@@ -27,3 +28,9 @@ class WorkflowToolResponse(BaseModel):
 
 class WorkflowListResponse(BaseModel):
     workflows: list[WorkflowSummary]
+
+
+class CapabilityDiscoveryResponse(BaseModel):
+    capabilities: list[CapabilityManifest]
+    registered_source_ids: list[str]
+    plugin_loading_enabled: bool

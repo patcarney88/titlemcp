@@ -6,8 +6,6 @@ import json
 import pathlib
 import unittest
 
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_us_oh_franklin_recorder.client import (
     RecorderProtocolError,
     RecorderSearchQuery,
@@ -15,6 +13,9 @@ from titlemcp_us_oh_franklin_recorder.client import (
     _to_result,
 )
 from titlemcp_us_oh_franklin_recorder.sources import FranklinRecorderSourceConnector
+
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.sources import SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "name_search.json"
 FRANKLIN = Jurisdiction(country="US", state="OH", county="Franklin County")

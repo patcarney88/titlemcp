@@ -6,9 +6,6 @@ import unittest
 from datetime import date
 from unittest import mock
 
-from title_mcp.domain.models import Jurisdiction
-from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery, RecordedInstrument
-from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 from titlemcp_platform_countyfusion import (
     CountyFusionClient,
     CountyFusionProtocolError,
@@ -16,6 +13,10 @@ from titlemcp_platform_countyfusion import (
     CountyFusionSiteConfig,
 )
 from titlemcp_platform_countyfusion.index import CountyFusionIndex, surname_first
+
+from title_mcp.domain.models import Jurisdiction
+from title_mcp.domain.recorder import InstrumentKind, MortgageReleaseQuery, RecordedInstrument
+from title_mcp.sources import MortgageReleaseSource, SourceKind, SourceQuery, SourceResultStatus
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 CONFIG = CountyFusionSiteConfig(

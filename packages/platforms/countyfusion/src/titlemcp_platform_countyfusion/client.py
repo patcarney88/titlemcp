@@ -39,7 +39,6 @@ from title_mcp.domain.recorder import (
     RecordedInstrument,
     classify_instrument,
 )
-
 from titlemcp_platform_countyfusion.config import CountyFusionSiteConfig
 
 USER_AGENT = (

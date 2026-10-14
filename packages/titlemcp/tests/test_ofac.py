@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from title_mcp.domain.models import Jurisdiction
 from title_mcp.settings import TitleMCPSettings
@@ -421,7 +422,12 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.settings = TitleMCPSettings(ofac_cache_dir=self.tmp.name)
         self.fetcher = _FakeFetcher(
-            {"SDN.XML": _xml(ENTRIES), "CONSOLIDATED.XML": _xml([], "09/14/2026")}
+            {
+                "SDN.XML": _xml(ENTRIES),
+                "CONSOLIDATED.XML": _xml(
+                    [_entry("100", "UNRELATED ZYXW INDUSTRIES", "Entity")], "09/14/2026"
+                ),
+            }
         )
 
     def tearDown(self) -> None:
@@ -457,7 +463,7 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
             [c.label for c in result.citations],
             [
                 "OFAC SDN list, published 10/02/2026 (7 entries)",
-                "OFAC CONSOLIDATED list, published 09/14/2026 (0 entries)",
+                "OFAC CONSOLIDATED list, published 09/14/2026 (1 entries)",
             ],
         )
         self.assertTrue(all(c.metadata["sha256"] for c in result.citations))
@@ -474,6 +480,7 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
             parties=[{"name": "Abu Qarsani"}, {"name": "Some Newly Listed"}],
             changes_only=True,
             refresh=True,
+            lists=["sdn"],
         )
 
         outcomes = [p["outcome"] for p in result.records[0]["parties"]]
@@ -488,9 +495,9 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self._query(connector, parties=[{"name": "Abu Qarsani"}])
 
         self.assertEqual(result.status, SourceResultStatus.FAILED)
-        self.assertIn("sanctionslistservice.ofac.treas.gov", result.warnings[0])
+        self.assertIn("fresh, valid lists", result.warnings[0])
 
-    async def test_a_stale_copy_is_used_and_said_to_be_stale(self) -> None:
+    async def test_an_expired_copy_cannot_produce_a_screening_outcome(self) -> None:
         ListStore(Path(self.tmp.name), fetcher=self.fetcher).load(SanctionsList.SDN)
         ListStore(Path(self.tmp.name), fetcher=self.fetcher).load(SanctionsList.CONSOLIDATED)
         old = time.time() - 5 * 86400
@@ -502,8 +509,8 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self._query(connector, parties=[{"name": "Abu Qarsani"}])
 
-        self.assertEqual(result.status, SourceResultStatus.SUCCEEDED)
-        self.assertTrue(any("days old" in w for w in result.warnings))
+        self.assertEqual(result.status, SourceResultStatus.FAILED)
+        self.assertEqual(result.records, [])
 
     async def test_a_party_date_of_birth_is_echoed_as_the_year_only(self) -> None:
         connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
@@ -523,9 +530,56 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self._query(connector, parties=[{"name": "Abu Qarsani"}], refresh=True)
 
-        self.assertEqual(result.status, SourceResultStatus.SUCCEEDED)
+        self.assertEqual(result.status, SourceResultStatus.PARTIAL)
         self.assertEqual(result.records[0]["parties"][0]["outcome"], "potential_match")
         self.assertIn(b"<sdnList", (Path(self.tmp.name) / "SDN.XML").read_bytes())
+
+    async def test_refresh_failures_at_25_36_and_72_hours_enforce_configured_age(self):
+        connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
+        await self._query(connector, parties=[{"name": "Mary Johnson"}])
+        connector.settings.ofac_max_screening_age_hours = 48
+        self.fetcher.fail = True
+        for hours in (25, 36, 72):
+            with self.subTest(hours=hours):
+                old = time.time() - hours * 3600
+                for path in Path(self.tmp.name).glob("*.XML"):
+                    os.utime(path, (old, old))
+                result = await self._query(connector, parties=[{"name": "Mary Johnson"}])
+                if hours < 48:
+                    self.assertEqual(result.status, SourceResultStatus.PARTIAL)
+                    self.assertTrue(result.records[0]["lists"][0]["refresh_failed"])
+                    self.assertTrue(result.warnings)
+                else:
+                    self.assertEqual(result.status, SourceResultStatus.FAILED)
+                    self.assertEqual(result.records, [])
+
+    async def test_empty_and_count_inconsistent_lists_preserve_good_cache(self):
+        connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
+        await self._query(connector, parties=[{"name": "Mary Johnson"}])
+        path = Path(self.tmp.name) / "SDN.XML"
+        previous = path.read_bytes()
+        for invalid in (_xml([]), _xml(ENTRIES).replace(b">7<", b">99<")):
+            self.fetcher.data["SDN.XML"] = invalid
+            result = await self._query(connector, parties=[{"name": "Mary Johnson"}], refresh=True)
+            self.assertEqual(result.status, SourceResultStatus.PARTIAL)
+            self.assertEqual(path.read_bytes(), previous)
+
+    async def test_empty_list_selection_is_rejected(self):
+        connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
+        result = await self._query(connector, parties=[{"name": "Mary Johnson"}], lists=[])
+        self.assertEqual(result.status, SourceResultStatus.FAILED)
+
+    async def test_interrupted_atomic_replacement_preserves_valid_cache(self):
+        connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
+        await self._query(connector, parties=[{"name": "Mary Johnson"}])
+        path = Path(self.tmp.name) / "SDN.XML"
+        previous = path.read_bytes()
+        self.fetcher.data["SDN.XML"] = _xml(ENTRIES, "10/03/2026")
+        with patch("title_mcp.sources.ofac.lists.os.replace", side_effect=OSError("disk failure")):
+            result = await self._query(connector, parties=[{"name": "Mary Johnson"}], refresh=True)
+        self.assertEqual(result.status, SourceResultStatus.PARTIAL)
+        self.assertEqual(path.read_bytes(), previous)
+        self.assertFalse(any(p.name.startswith("tmp") for p in Path(self.tmp.name).iterdir()))
 
     async def test_the_record_carries_its_source(self) -> None:
         connector = OfacScreeningSourceConnector(settings=self.settings, fetcher=self.fetcher)
@@ -565,7 +619,7 @@ class OfacConnectorTests(unittest.IsolatedAsyncioTestCase):
         clear, match, held = (p["receipt"] for p in record["parties"])
 
         self.assertEqual(clear["searched_as"], ["MARY", "JOHNSON"])
-        self.assertEqual(clear["listed_names_total"], 11)  # 7 entries and 4 aliases
+        self.assertEqual(clear["listed_names_total"], 12)  # 8 entries and 4 aliases
         self.assertIn("published 10/02/2026", clear["summary"])
         self.assertIn("No listed name scored 0.72 or higher", clear["summary"])
         self.assertIn("MOHAMED->MUHAMMAD", match["variants_applied"])

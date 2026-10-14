@@ -39,3 +39,9 @@ loads only with `TITLE_MCP_LOAD_ENTRY_POINT_PLUGINS=true`.
 ```bash
 python -m unittest discover -s packages/jurisdictions/us/pa/tax/tests -v
 ```
+> **Runtime activation:** after installing this package, set
+> `TITLE_MCP_LOAD_ENTRY_POINT_PLUGINS=true` before starting TitleMCP.
+> Plugins execute installed Python code; enable this only for trusted packages.
+> Installation can expose a capability manifest without registering its county sources.
+> Confirm the expected connector with `list_source_connectors` or
+> `list_title_capabilities.registered_source_ids` before querying it.

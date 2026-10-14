@@ -291,6 +291,7 @@ class WorkflowRequest(BaseModel):
 
 class WorkflowRecord(BaseModel):
     id: str = Field(default_factory=lambda: new_id("wf"))
+    revision: int = Field(default=0, ge=0)
     kind: WorkflowKind
     status: WorkflowStatus = WorkflowStatus.QUEUED
     order: OrderRef

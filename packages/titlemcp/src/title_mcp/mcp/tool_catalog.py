@@ -16,7 +16,7 @@ from title_mcp.domain.models import (
     WorkflowStatus,
 )
 from title_mcp.domain.recorder import MortgageReleaseQuery
-from title_mcp.domain.responses import WorkflowListResponse
+from title_mcp.domain.responses import CapabilityDiscoveryResponse, WorkflowListResponse
 from title_mcp.domain.tax import PropertyTaxQuery
 from title_mcp.platform import TitleMCPPlatform
 from title_mcp.sources import (
@@ -765,7 +765,7 @@ def register_core_tools(mcp: MCPServer, platform: TitleMCPPlatform) -> None:
         kind: WorkflowKind | None = None,
         capability_type: CapabilityType | None = None,
     ) -> dict[str, Any]:
-        """List installed TitleMCP capability manifests, optionally filtered by scope."""
+        """List installed manifests and actual registered sources; a manifest is not activation."""
         await ensure_ready()
         if any([country, state, county, municipality]):
             jurisdiction = Jurisdiction(
@@ -794,7 +794,11 @@ def register_core_tools(mcp: MCPServer, platform: TitleMCPPlatform) -> None:
                     if capability_type in capability.capability_types
                 ]
 
-        return {"capabilities": [capability.model_dump(mode="json") for capability in capabilities]}
+        return CapabilityDiscoveryResponse(
+            capabilities=capabilities,
+            registered_source_ids=sorted(source.source_id for source in platform.sources.all()),
+            plugin_loading_enabled=platform.plugin_loading_enabled,
+        ).model_dump(mode="json")
 
     @mcp.tool(
         title="List Source Connectors",

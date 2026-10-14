@@ -80,6 +80,7 @@ class TitleMCPSettings(BaseSettings):
 
     ofac_cache_dir: str = "~/.cache/titlemcp/ofac"
     ofac_max_age_hours: float = Field(default=24.0, ge=0.0, le=720.0)
+    ofac_max_screening_age_hours: float = Field(default=24.0, ge=0.0, le=720.0)
     ofac_timeout_seconds: float = Field(default=120.0, ge=5.0, le=600.0)
 
     smart_proxy: str | None = None
@@ -91,6 +92,7 @@ class TitleMCPSettings(BaseSettings):
     regrid_max_proxy_attempts: int = Field(default=10, ge=1, le=1000)
     regrid_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     regrid_cookie_timeout_seconds: float = Field(default=5.0, ge=1.0, le=120.0)
+    regrid_query_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
 
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-opus-5"

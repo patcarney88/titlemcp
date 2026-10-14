@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -113,7 +115,27 @@ def parse(data: bytes, sanctions_list: SanctionsList) -> tuple[list[SanctionsEnt
         )
     if not publish_date:
         raise ValueError("The OFAC list export has no publish date.")
-    return entries, publish_date, count or len(entries)
+    if not entries or count != len(entries):
+        raise ValueError("The OFAC list must be nonempty and match its advertised record count.")
+    if any(not e.uid or not e.primary_name for e in entries):
+        raise ValueError("The OFAC list contains an entry without an identifier or name.")
+    if len({e.uid for e in entries}) != len(entries):
+        raise ValueError("The OFAC list contains duplicate identifiers.")
+    return entries, publish_date, count
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            temporary = handle.name
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
 
 
 class ListStore:
@@ -144,6 +166,7 @@ class ListStore:
             not path.exists()
             or (datetime.now(UTC).timestamp() - path.stat().st_mtime) / 3600 > self.max_age_hours
         )
+        refresh_failed = False
         if refresh or stale:
             try:
                 data = self.fetcher.fetch(url, self.timeout)
@@ -151,12 +174,16 @@ class ListStore:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
                 previous = path.read_bytes() if path.exists() else None
                 if previous is not None and previous != data:
-                    path.with_suffix(".previous.xml").write_bytes(previous)
-                path.write_bytes(data)
-            except Exception:  # noqa: BLE001  (a stale copy beats none; the caller sees its date)
+                    _atomic_write(path.with_suffix(".previous.xml"), previous)
+                _atomic_write(path, data)
+            except Exception:  # noqa: BLE001  (the screening policy limits fallback age)
+                refresh_failed = True
                 if not path.exists():
                     raise
-        data = path.read_bytes()
+        # Read bytes and age from the same inode if another worker replaces the cache.
+        with path.open("rb") as cached:
+            data = cached.read()
+            retrieved_timestamp = os.fstat(cached.fileno()).st_mtime
         entries, publish_date, count = parse(data, sanctions_list)
         version = ListVersion(
             sanctions_list=sanctions_list,
@@ -164,7 +191,9 @@ class ListStore:
             record_count=count,
             sha256=hashlib.sha256(data).hexdigest(),
             source_url=url,
-            retrieved_at=datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+            retrieved_at=datetime.fromtimestamp(retrieved_timestamp, UTC).isoformat(),
+            refresh_failed=refresh_failed,
+            stale=(datetime.now(UTC).timestamp() - retrieved_timestamp) / 3600 > self.max_age_hours,
         )
         return entries, version
 
