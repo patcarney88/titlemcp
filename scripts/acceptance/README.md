@@ -1,7 +1,8 @@
 # Local Postgres and Docker acceptance
 
-See the [sanitized 2026-10-14 results](RESULTS-2026-10-14.md) for the completed run
-and its exact tested source revision.
+See the [sanitized e841634a9 rerun results](RESULTS-2026-10-14-e841634a9.md) for
+the latest completed acceptance run and its exact tested source revision. The
+[earlier 2026-10-14 results](RESULTS-2026-10-14.md) remain available separately.
 
 Run explicitly from a local OrbStack workstation with Python 3.12:
 
